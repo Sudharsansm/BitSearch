@@ -4,9 +4,9 @@ Version: 1.0.0
 Summary: BitSearch Intelligence Engine — AI-native real-time retrieval platform powered by Bitscrape
 Author-email: Sudharsansm <sudharsansm@example.com>
 License: MIT
-Project-URL: Homepage, https://github.com/Sudharsansm/BitSearch-Intelligence-Engine
-Project-URL: Repository, https://github.com/Sudharsansm/BitSearch-Intelligence-Engine
-Project-URL: Issues, https://github.com/Sudharsansm/BitSearch-Intelligence-Engine/issues
+Project-URL: Homepage, https://github.com/Sudharsansm/BitSearch
+Project-URL: Repository, https://github.com/Sudharsansm/BitSearch
+Project-URL: Issues, https://github.com/Sudharsansm/BitSearch/issues
 Keywords: search,rag,llm,retrieval,ai,bitscrape,web-search
 Classifier: Development Status :: 3 - Alpha
 Classifier: Intended Audience :: Developers
@@ -17,7 +17,7 @@ Classifier: Topic :: Internet :: WWW/HTTP :: Indexing/Search
 Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
-Requires-Dist: bitscrape>=0.1.0
+Requires-Dist: bitscrape>=0.1.6
 Requires-Dist: fastapi>=0.111.0
 Requires-Dist: uvicorn[standard]>=0.30.0
 Requires-Dist: httpx>=0.27.0

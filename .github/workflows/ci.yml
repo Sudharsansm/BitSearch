@@ -7,7 +7,6 @@ on:
       - develop
     tags:
       - "v*"
-
   pull_request:
     branches:
       - main
@@ -15,13 +14,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         python-version:
           - "3.11"
           - "3.12"
-
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -43,13 +40,13 @@ jobs:
   build:
     needs: test
     runs-on: ubuntu-latest
-
     if: startsWith(github.ref, 'refs/tags/v')
-
     steps:
-      - uses: actions/checkout@v4
+      #  FIXED: Upgraded from @v4 to @v6 to eliminate Node.js 20 warning
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      #  FIXED: Upgraded from @v5 to @v6 to eliminate Node.js 20 warning
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -69,22 +66,20 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
-
     if: startsWith(github.ref, 'refs/tags/v')
-
     permissions:
       id-token: write
       contents: read
-
     environment:
       name: pypi
-
     steps:
       - name: Download Distribution
         uses: actions/download-artifact@v7
         with:
           name: dist
-          path: dist/
+          #  FIXED: When using download-artifact@v7, omit or change path 
+          # if you want the files placed directly inside the workspace.
+          path: dist
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

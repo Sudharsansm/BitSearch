@@ -1,103 +1,135 @@
 """
-BIE CLI — bie serve / bie search / bie crawl
+BIE command-line interface.
+
+Examples::
+
+    bie search "AI regulation 2026" --url https://example.com/news
+    bie crawl https://example.com --max-pages 20 --out docs.jsonl
+    bie serve --port 8000
+    bie mcp
 """
 
 from __future__ import annotations
 
-import argparse
-import asyncio
+import json
 import sys
 
+import click
 
-def main():
-    parser = argparse.ArgumentParser(
-        prog="bie",
-        description="BitSearch Intelligence Engine CLI",
-    )
-    sub = parser.add_subparsers(dest="command")
+from bie import __version__
+from bie.config import BIESettings
+from bie.engine import BIE
 
-    # ── serve ──────────────────────────────────────────────────────────────
-    serve_p = sub.add_parser("serve", help="Start the BIE API server")
-    serve_p.add_argument("--host", default="0.0.0.0")
-    serve_p.add_argument("--port", type=int, default=8000)
-    serve_p.add_argument("--reload", action="store_true")
-    serve_p.add_argument("--workers", type=int, default=1)
 
-    # ── search ──────────────────────────────────────────────────────────────
-    search_p = sub.add_parser("search", help="Run a search query against a running BIE instance")
-    search_p.add_argument("query")
-    search_p.add_argument("--url", default="http://localhost:8000")
-    search_p.add_argument("--api-key", default="dev-key")
-    search_p.add_argument("--top-k", type=int, default=5)
-    search_p.add_argument("--agent", action="store_true", help="Use agent (LLM answer) mode")
+@click.group()
+@click.version_option(__version__, prog_name="bie")
+def cli() -> None:
+    """BIE — BitSearch Intelligence Engine. Real-time web search & extraction for AI apps."""
 
-    # ── crawl ───────────────────────────────────────────────────────────────
-    crawl_p = sub.add_parser("crawl", help="Crawl and index a URL")
-    crawl_p.add_argument("url")
-    crawl_p.add_argument("--server", default="http://localhost:8000")
-    crawl_p.add_argument("--api-key", default="dev-key")
 
-    args = parser.parse_args()
+@cli.command()
+@click.argument("query")
+@click.option("--url", "urls", multiple=True, required=True, help="Seed URL(s) to crawl & search")
+@click.option("--top-k", default=10, show_default=True, help="Number of results to return")
+@click.option("--max-pages", default=10, show_default=True, help="Max pages to crawl per seed URL")
+@click.option("--no-embeddings", is_flag=True, help="Disable semantic/vector search (BM25 only)")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON")
+def search(query: str, urls: tuple[str, ...], top_k: int, max_pages: int, no_embeddings: bool, as_json: bool) -> None:
+    """Crawl URL(s) and search the freshly indexed content for QUERY."""
+    settings = BIESettings(max_pages=max_pages, use_embeddings=not no_embeddings)
+    engine = BIE(settings)
+    click.echo(f"Crawling {len(urls)} source(s)...", err=True)
+    n = engine.crawl(list(urls))
+    click.echo(f"Indexed {n} document(s). Searching...", err=True)
 
-    if args.command == "serve":
-        _serve(args)
-    elif args.command == "search":
-        asyncio.run(_search(args))
-    elif args.command == "crawl":
-        asyncio.run(_crawl(args))
+    response = engine.search_full(query, top_k=top_k)
+
+    if as_json:
+        click.echo(response.model_dump_json(indent=2))
+        return
+
+    if not response.results:
+        click.echo("No results found.")
+        return
+
+    for i, r in enumerate(response.results, 1):
+        click.echo(f"\n{i}. {r.title}")
+        click.echo(f"   {r.url}")
+        click.echo(f"   score={r.score:.4f}  trust={r.trust_score:.2f}")
+        click.echo(f"   {r.snippet}")
+    click.echo(f"\n({response.took_ms} ms, {response.total_indexed_documents} docs indexed)")
+
+
+@cli.command()
+@click.argument("urls", nargs=-1, required=True)
+@click.option("--max-pages", default=40, show_default=True)
+@click.option("--max-depth", default=2, show_default=True)
+@click.option("--out", "output", default=None, help="Write extracted documents as JSONL to this path")
+def crawl(urls: tuple[str, ...], max_pages: int, max_depth: int, output: str | None) -> None:
+    """Crawl URLS using the Bitscrape-powered spider and print/save extracted docs."""
+    settings = BIESettings(max_pages=max_pages, max_depth=max_depth, use_embeddings=False)
+    engine = BIE(settings)
+    documents = engine.crawler.crawl(list(urls))
+
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            for doc in documents:
+                f.write(doc.model_dump_json() + "\n")
+        click.echo(f"Wrote {len(documents)} document(s) to {output}")
     else:
-        parser.print_help()
-        sys.exit(0)
+        for doc in documents:
+            click.echo(json.dumps({"url": doc.url, "title": doc.title, "chars": len(doc.text)}))
+        click.echo(f"\n{len(documents)} document(s) crawled.", err=True)
 
 
-def _serve(args):
+@cli.command()
+@click.option("--host", default=None, help="Bind host (default from settings / 0.0.0.0)")
+@click.option("--port", default=None, type=int, help="Bind port (default from settings / 8000)")
+@click.option("--reload", is_flag=True, help="Auto-reload on code changes (dev only)")
+def serve(host: str | None, port: int | None, reload: bool) -> None:
+    """Run the BIE REST API server (FastAPI + Uvicorn)."""
     try:
         import uvicorn
     except ImportError:
-        print("uvicorn not installed. Run: pip install uvicorn[standard]")
+        click.echo("uvicorn is required: pip install bie[server]", err=True)
         sys.exit(1)
 
+    settings = BIESettings()
     uvicorn.run(
-        "bie.api:app",
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
-        workers=args.workers if not args.reload else 1,
-        log_level="info",
+        "bie.server:app",
+        host=host or settings.host,
+        port=port or settings.port,
+        reload=reload,
     )
 
 
-async def _search(args):
-    from bie.client import BIEClient
+@cli.command()
+def mcp() -> None:
+    """Run BIE as a Model Context Protocol (MCP) server over stdio.
 
-    async with BIEClient(base_url=args.url, api_key=args.api_key) as client:
-        if args.agent:
-            print(f"\n🤖  Agent query: {args.query!r}\n")
-            resp = await client.agent_query(args.query, top_k=args.top_k)
-            print(resp.answer)
-            print(f"\n📚  Citations ({len(resp.citations)}):")
-            for c in resp.citations:
-                print(f"  [{c.index}] {c.title} — {c.url}")
-        else:
-            print(f"\n🔍  Search: {args.query!r}\n")
-            resp = await client.search(args.query, top_k=args.top_k)
-            print(f"Found {resp.total_found} results in {resp.latency_ms:.0f} ms\n")
-            for r in resp.results:
-                print(
-                    f"  [{r.rank}] {r.title}\n"
-                    f"       {r.url}\n"
-                    f"       trust={r.trust_score}  rrf={r.rrf_score}\n"
-                    f"       {r.snippet[:120]}…\n"
-                )
+    Add to your MCP client config (e.g. Claude Desktop) as a command:
+
+    \b
+        {
+          "mcpServers": {
+            "bie": {
+              "command": "bie",
+              "args": ["mcp"]
+            }
+          }
+        }
+    """
+    try:
+        from bie.mcp.server import run_mcp_server
+    except ImportError:
+        click.echo("MCP support requires: pip install bie[mcp]", err=True)
+        sys.exit(1)
+
+    run_mcp_server()
 
 
-async def _crawl(args):
-    from bie.client import BIEClient
-
-    async with BIEClient(base_url=args.server, api_key=args.api_key) as client:
-        print(f"Crawling {args.url} …")
-        resp = await client.crawl_url(args.url)
-        print(f"Status: {resp.status} — {resp.message}")
+def main() -> None:
+    cli()
 
 
 if __name__ == "__main__":

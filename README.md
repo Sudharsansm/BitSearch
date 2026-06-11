@@ -15,7 +15,7 @@ all from a single Python call, REST endpoint, CLI command, or
 [MCP](https://modelcontextprotocol.io) tool.
 
 ```python
-import bie
+import bits-bie
 
 results = bie.search(
     "latest semiconductor export rules 2026",
@@ -45,16 +45,16 @@ for r in results:
 ## Install
 
 ```bash
-pip install bie
+pip install bits-bie
 ```
 
 Optional extras:
 
 ```bash
-pip install "bie[embeddings]"  # semantic/vector search (sentence-transformers)
-pip install "bie[server]"      # FastAPI + Uvicorn REST server
-pip install "bie[mcp]"         # Model Context Protocol server
-pip install "bie[all]"         # everything
+pip install "bits-bie[embeddings]"  # semantic/vector search (sentence-transformers)
+pip install "bits-bie[server]"      # FastAPI + Uvicorn REST server
+pip install "bits-bie[mcp]"         # Model Context Protocol server
+pip install "bits-bie[all]"         # everything
 ```
 
 > BIE depends on [`bitscrape`](https://pypi.org/project/bitscrape/), our
@@ -68,7 +68,7 @@ pip install "bie[all]"         # everything
 ### 1. One-shot search (Python)
 
 ```python
-import bie
+import bits-bie
 
 results = bie.search("AI regulation news", urls=["https://example.com/news"], top_k=5)
 for r in results:
@@ -78,7 +78,7 @@ for r in results:
 ### 2. Build a reusable index
 
 ```python
-from bie import BIE
+from bits-bie import BIE
 
 engine = BIE()
 engine.crawl(["https://example.com/blog", "https://another-site.com"])
@@ -161,7 +161,7 @@ All settings can be set via environment variables prefixed with `BIE_`,
 or passed directly:
 
 ```python
-from bie import BIE, BIESettings
+from bits-bie import BIE, BIESettings
 
 engine = BIE(BIESettings(
     max_pages=20,
@@ -220,7 +220,7 @@ for Elasticsearch/Milvus-backed implementations behind the same
 ## Built on Bitscrape
 
 BIE's crawling and extraction layer is powered by
-[**Bitscrape**](https://github.com/Sudharsansm/Bitscrape)
+[**BitS**](https://github.com/Sudharsansm/Bitscrape)
 (`pip install bitscrape`), our async, robots.txt-aware web scraping
 framework — giving BIE high-performance, polite, production-grade crawling
 out of the box.

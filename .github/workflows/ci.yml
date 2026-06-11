@@ -41,6 +41,7 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           file: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
         continue-on-error: true
 
   lint:
@@ -59,7 +60,7 @@ jobs:
       - name: Install Ruff
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          pip install "ruff==0.6.9"
 
       - name: Check lint
         run: ruff check bie tests

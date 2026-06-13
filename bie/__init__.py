@@ -63,7 +63,7 @@ from bie.security import SecurityFinding, SecurityReport, scan_for_prompt_inject
 from bie.sitecrawl import crawl_site
 from bie.sitemap import SiteMap, map_site
 
-__version__ = "0.5.0"
+__version__ = "1.2.1"
 
 __all__ = [
     "BIE",

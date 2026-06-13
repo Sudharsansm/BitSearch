@@ -15,8 +15,7 @@ def main() -> None:
         urls=["https://quotes.toscrape.com/"],
         top_k=5,
         max_pages=5,
-        max_depth=0,  # don't follow links — avoids bitscrape scheduler tie-break bug
-        use_embeddings=False,
+        use_embeddings=False,  # set True (default) for semantic search
     )
 
     for i, r in enumerate(results, 1):

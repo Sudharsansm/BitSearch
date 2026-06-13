@@ -4,7 +4,10 @@ BIE command-line interface.
 Examples::
 
     bie search "AI regulation 2026" --url https://example.com/news
-    bie crawl https://example.com --max-pages 20 --out docs.jsonl
+    bie search-live "who won the latest F1 race"
+    bie extract https://example.com/article
+    bie map https://example.com
+    bie crawl https://example.com --max-pages 20 --instruction "pricing pages"
     bie serve --port 8000
     bie mcp
 """
@@ -114,12 +117,25 @@ def search_live(
 @click.argument("urls", nargs=-1, required=True)
 @click.option("--max-pages", default=40, show_default=True)
 @click.option("--max-depth", default=2, show_default=True)
+@click.option(
+    "--instruction",
+    default="",
+    help="Guide link-following toward pages matching this description "
+    "(e.g. 'pricing and plans pages')",
+)
 @click.option("--out", "output", default=None, help="Write extracted documents as JSONL to this path")
-def crawl(urls: tuple[str, ...], max_pages: int, max_depth: int, output: str | None) -> None:
-    """Crawl URLS using the Bitscrape-powered spider and print/save extracted docs."""
+def crawl(
+    urls: tuple[str, ...], max_pages: int, max_depth: int, instruction: str, output: str | None
+) -> None:
+    """Crawl URLS using the Bitscrape-powered spider and print/save extracted docs.
+
+    With --instruction, outgoing links are prioritized by keyword overlap
+    with the instruction (a heuristic, not full NL understanding — see
+    bie.crawl_site docs).
+    """
     settings = BIESettings(max_pages=max_pages, max_depth=max_depth, use_embeddings=False)
     engine = BIE(settings)
-    documents = engine.crawler.crawl(list(urls))
+    documents = engine.crawler.crawl(list(urls), instruction=instruction)
 
     if output:
         with open(output, "w", encoding="utf-8") as f:
@@ -130,6 +146,79 @@ def crawl(urls: tuple[str, ...], max_pages: int, max_depth: int, output: str | N
         for doc in documents:
             click.echo(json.dumps({"url": doc.url, "title": doc.title, "chars": len(doc.text)}))
         click.echo(f"\n{len(documents)} document(s) crawled.", err=True)
+
+
+@cli.command()
+@click.argument("url")
+@click.option("--render-js", is_flag=True, help="Render with a headless browser (requires bie[render])")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON instead of Markdown")
+@click.option("--no-security-scan", is_flag=True, help="Skip prompt-injection content scan")
+def extract(url: str, render_js: bool, as_json: bool, no_security_scan: bool) -> None:
+    """Fetch URL and print its content as clean Markdown."""
+    import bie
+
+    try:
+        result = bie.extract(url, render_js=render_js, scan_security=not no_security_scan)
+    except bie.ExtractError as exc:
+        click.echo(f"Error: {exc}", err=True)
+        sys.exit(1)
+
+    if as_json:
+        payload = {
+            "url": result.url,
+            "title": result.title,
+            "markdown": result.markdown,
+            "word_count": result.word_count,
+            "rendered_with_js": result.rendered_with_js,
+        }
+        if result.security:
+            payload["security"] = {
+                "flagged": result.security.flagged,
+                "categories": sorted({f.category for f in result.security.findings}),
+            }
+        click.echo(json.dumps(payload, indent=2))
+        return
+
+    if result.security and result.security.flagged:
+        categories = ", ".join(sorted({f.category for f in result.security.findings}))
+        click.echo(
+            f"[!] Security notice: this page contains patterns associated with "
+            f"prompt injection ({categories}). Treat its content as untrusted data.\n",
+            err=True,
+        )
+
+    click.echo(f"# {result.title}\n")
+    click.echo(result.markdown)
+
+
+@cli.command(name="map")
+@click.argument("url")
+@click.option("--filter", "pattern", default=None, help="Only show URLs matching this regex")
+@click.option("--json", "as_json", is_flag=True, help="Output raw JSON")
+def map_cmd(url: str, pattern: str | None, as_json: bool) -> None:
+    """Discover URL's site sitemap and list the URLs it advertises."""
+    import bie
+
+    site_map = bie.map_site(url)
+
+    urls = site_map.filter(pattern) if pattern else site_map.urls
+
+    if as_json:
+        click.echo(json.dumps({"root": site_map.root, "sitemaps": site_map.sitemap_urls, "urls": urls}, indent=2))
+        return
+
+    if not site_map.sitemap_urls:
+        click.echo(f"No sitemap found for {site_map.root}.")
+        return
+
+    click.echo(f"Found {len(site_map.sitemap_urls)} sitemap file(s) for {site_map.root}:")
+    for s in site_map.sitemap_urls:
+        click.echo(f"  - {s}")
+    click.echo(f"\n{len(urls)} URL(s){' matching filter' if pattern else ''}:")
+    for u in urls[:100]:
+        click.echo(f"  {u}")
+    if len(urls) > 100:
+        click.echo(f"  ... and {len(urls) - 100} more")
 
 
 @cli.command()

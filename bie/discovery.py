@@ -94,6 +94,46 @@ def discover_urls(query: str, max_results: int = 5, timeout: float = 15.0) -> li
     return []
 
 
+def discover_urls_multi(
+    queries: list[str], max_results_per_query: int = 5, max_total: int = 15, timeout: float = 15.0
+) -> list[str]:
+    """Run :func:`discover_urls` for several query variants and merge the
+    results, ranked by how many variants surfaced each URL.
+
+    This implements simple **query fan-out**: searching multiple phrasings
+    of the same question (e.g. the original query plus a couple of
+    rewordings) surfaces a broader, more relevant set of candidate pages
+    than a single query alone — particularly for ambiguous or
+    multi-faceted questions.
+
+    Args:
+        queries: Query variants to search, in priority order. The first
+            is treated as the primary query.
+        max_results_per_query: How many URLs to fetch per query variant.
+        max_total: Maximum number of URLs to return overall.
+        timeout: Per-request timeout in seconds.
+
+    Returns:
+        Deduplicated URLs, ordered by (number of variants that returned
+        them, then first-seen order). URLs found by multiple query
+        variants are considered more likely relevant.
+    """
+    url_votes: dict[str, int] = {}
+    url_order: dict[str, int] = {}
+    order_counter = 0
+
+    for query in queries:
+        for url in discover_urls(query, max_results=max_results_per_query, timeout=timeout):
+            if url not in url_votes:
+                url_votes[url] = 0
+                url_order[url] = order_counter
+                order_counter += 1
+            url_votes[url] += 1
+
+    ranked = sorted(url_votes.keys(), key=lambda u: (-url_votes[u], url_order[u]))
+    return ranked[:max_total]
+
+
 def _fetch_ddg_html(client: httpx.Client, query: str) -> str:
     resp = client.post("https://html.duckduckgo.com/html/", data={"q": query})
     resp.raise_for_status()

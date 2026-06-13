@@ -79,6 +79,28 @@ class CrawlRequest(BaseModel):
     allowed_domains: list[str] | None = Field(
         default=None, description="Restrict link-following to these domains"
     )
+    instruction: str = Field(
+        default="",
+        description="Optional description of what to look for (e.g. 'pricing "
+        "and plans pages'). Outgoing links are prioritized by keyword overlap "
+        "with this instruction.",
+    )
+
+
+class ExtractRequest(BaseModel):
+    url: str = Field(..., description="The URL to fetch")
+    render_js: bool = Field(
+        default=False,
+        description="Render with a headless browser (requires the 'render' extra "
+        "to be installed on the server).",
+    )
+
+
+class MapRequest(BaseModel):
+    url: str = Field(..., description="Any URL on the target site")
+    filter_pattern: str | None = Field(
+        default=None, description="Optional regex to filter returned URLs"
+    )
 
 
 class CrawlResponse(BaseModel):
@@ -143,9 +165,59 @@ async def search_live(req: SearchLiveRequest) -> dict:
 
 @app.post("/crawl/url", response_model=CrawlResponse, tags=["ingest"], dependencies=[Depends(require_api_key)])
 async def crawl(req: CrawlRequest) -> CrawlResponse:
-    """Trigger an on-demand crawl of one or more URLs and add to the index."""
-    n = await _async_crawl(req.urls, req.allowed_domains)
+    """Trigger an on-demand crawl of one or more URLs and add to the index.
+
+    If `instruction` is set, outgoing links are prioritized by keyword
+    overlap with it (a heuristic, not full NL understanding).
+    """
+    n = await _async_crawl(req.urls, req.allowed_domains, req.instruction)
     return CrawlResponse(documents_indexed=n, total_indexed_documents=len(engine))
+
+
+@app.post("/extract", tags=["extract"], dependencies=[Depends(require_api_key)])
+async def extract_endpoint(req: ExtractRequest) -> dict:
+    """Fetch a URL and return its content as clean Markdown.
+
+    If the page appears to require JavaScript and `render_js=false`,
+    returns a 422 with a message suggesting `render_js=true` (requires the
+    server to have the `render` extra installed).
+    """
+    import bie
+
+    try:
+        result = bie.extract(req.url, render_js=req.render_js)
+    except bie.ExtractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    payload: dict = {
+        "url": result.url,
+        "title": result.title,
+        "markdown": result.markdown,
+        "word_count": result.word_count,
+        "rendered_with_js": result.rendered_with_js,
+    }
+    if result.security:
+        payload["security"] = {
+            "flagged": result.security.flagged,
+            "categories": sorted({f.category for f in result.security.findings}),
+        }
+    return payload
+
+
+@app.post("/map", tags=["extract"], dependencies=[Depends(require_api_key)])
+async def map_endpoint(req: MapRequest) -> dict:
+    """Discover a website's sitemap and return the URLs it advertises."""
+    import bie
+
+    site_map = bie.map_site(req.url)
+    urls = site_map.filter(req.filter_pattern) if req.filter_pattern else site_map.urls
+
+    return {
+        "root": site_map.root,
+        "sitemap_files": site_map.sitemap_urls,
+        "url_count": len(urls),
+        "urls": urls[:500],
+    }
 
 
 @app.post("/indices/update", tags=["ingest"], dependencies=[Depends(require_api_key)])
@@ -165,8 +237,12 @@ async def metrics() -> dict:
     }
 
 
-async def _async_crawl(urls: list[str], allowed_domains: list[str] | None) -> int:
-    documents = await engine.crawler.acrawl(urls, allowed_domains=allowed_domains)
+async def _async_crawl(
+    urls: list[str], allowed_domains: list[str] | None, instruction: str = ""
+) -> int:
+    documents = await engine.crawler.acrawl(
+        urls, allowed_domains=allowed_domains, instruction=instruction
+    )
     for doc in documents:
         engine.add_document(doc)
     return len(documents)

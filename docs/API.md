@@ -3,7 +3,7 @@
 Start the server:
 
 ```bash
-pip install "bie[server,embeddings]"
+pip install "bits-bie[server,embeddings]"
 bie serve --port 8000
 ```
 
@@ -21,22 +21,118 @@ Health check, no auth required.
 ```json
 {
   "status": "ok",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "indexed_documents": 12,
   "vector_search": true
+}
+```
+
+## `POST /search/live`
+
+Search the live internet for `query` — no seed URLs, no API key, no
+subscription required. Discovers relevant URLs via free public search
+endpoints (DuckDuckGo, with a Bing fallback), crawls them with Bitscrape,
+and ranks the extracted content via BIE's hybrid index.
+
+**Request**
+```json
+{
+  "query": "who won the latest F1 race",
+  "top_k": 5,
+  "discovery_results": 8,
+  "deep": true
+}
+```
+
+**Response**
+```json
+{
+  "query": "who won the latest F1 race",
+  "results": [
+    {
+      "title": "...",
+      "url": "https://...",
+      "snippet": "...",
+      "source": "example.com",
+      "score": 0.041,
+      "bm25_score": 8.2,
+      "vector_score": 0.83,
+      "trust_score": 0.5,
+      "publish_date": null,
+      "chunk_id": "...",
+      "doc_id": "..."
+    }
+  ]
+}
+```
+
+## `POST /extract`
+
+Fetch a URL and return its content as clean Markdown, with
+navigation/ads/scripts stripped.
+
+**Request**
+```json
+{
+  "url": "https://example.com/article",
+  "render_js": false
+}
+```
+
+**Response**
+```json
+{
+  "url": "https://example.com/article",
+  "title": "Article Title",
+  "markdown": "# Article Title\n\n...",
+  "word_count": 842,
+  "rendered_with_js": false,
+  "security": {
+    "flagged": false,
+    "categories": []
+  }
+}
+```
+
+If the page appears to require JavaScript and `render_js` is `false`,
+returns **422** with a message suggesting `render_js: true` (requires the
+server to have the `render` extra installed: `pip install "bits-bie[render]"`
+plus `playwright install chromium`).
+
+## `POST /map`
+
+Discover a website's sitemap(s) and the URLs they advertise.
+
+**Request**
+```json
+{
+  "url": "https://example.com",
+  "filter_pattern": "/blog/"
+}
+```
+
+**Response**
+```json
+{
+  "root": "https://example.com",
+  "sitemap_files": ["https://example.com/sitemap_index.xml"],
+  "url_count": 42,
+  "urls": ["https://example.com/blog/post-1", "..."]
 }
 ```
 
 ## `POST /crawl/url`
 
 Crawl one or more seed URLs (with bounded link-following) and add the
-extracted pages to the index.
+extracted pages to the index. Optionally guided by `instruction`
+(keyword-relevance link prioritization).
 
 **Request**
 ```json
 {
   "urls": ["https://example.com/news"],
-  "allowed_domains": ["example.com"]
+  "allowed_domains": ["example.com"],
+  "instruction": "pricing and plans pages"
 }
 ```
 

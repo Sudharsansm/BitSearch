@@ -51,13 +51,32 @@ class BIE:
     # Ingestion
     # ------------------------------------------------------------------
 
-    def crawl(self, urls: list[str], allowed_domains: list[str] | None = None) -> int:
+    def crawl(
+        self,
+        urls: list[str],
+        allowed_domains: list[str] | None = None,
+        instruction: str = "",
+    ) -> int:
         """Crawl ``urls`` (and linked pages, bounded by settings) and add
         the extracted documents to the index.
 
+        Args:
+            urls: Seed URLs to crawl.
+            allowed_domains: Restrict link-following to these domains
+                (defaults to the domains of ``urls``).
+            instruction: Optional short natural-language description of
+                what to look for (e.g. "pricing and plans pages"). When
+                set, outgoing links are ranked by keyword overlap with the
+                instruction and only the most relevant are followed. This
+                is a keyword-relevance heuristic, not full semantic
+                understanding — see :mod:`bie.spiders.generic` for
+                details.
+
         Returns the number of documents added.
         """
-        documents = self.crawler.crawl(urls, allowed_domains=allowed_domains)
+        documents = self.crawler.crawl(
+            urls, allowed_domains=allowed_domains, instruction=instruction
+        )
         for doc in documents:
             self.add_document(doc)
         return len(documents)

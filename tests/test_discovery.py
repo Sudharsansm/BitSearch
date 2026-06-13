@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from bie.discovery import _parse_result_urls, _resolve_redirect, discover_urls
+from bie.discovery import _parse_result_urls, _resolve_redirect, discover_urls, discover_urls_multi
 
 # Minimal realistic snippet of DuckDuckGo HTML results page markup
 _SAMPLE_HTML = """
@@ -115,4 +115,36 @@ def test_discover_urls_all_backends_fail_returns_empty():
          patch("bie.discovery._fetch_bing_html", fake_fetch_fail):
         urls = discover_urls("test query", max_results=5)
 
+    assert urls == []
+
+
+def test_discover_urls_multi_merges_and_ranks_by_votes():
+    def fake_discover(query, max_results=5, timeout=15.0):
+        mapping = {
+            "q1": ["https://a.example.com", "https://b.example.com"],
+            "q2": ["https://b.example.com", "https://c.example.com"],
+        }
+        return mapping.get(query, [])
+
+    with patch("bie.discovery.discover_urls", side_effect=fake_discover):
+        urls = discover_urls_multi(["q1", "q2"], max_results_per_query=5, max_total=10)
+
+    # b.example.com appears in both queries -> ranked first
+    assert urls[0] == "https://b.example.com"
+    assert set(urls) == {"https://a.example.com", "https://b.example.com", "https://c.example.com"}
+
+
+def test_discover_urls_multi_respects_max_total():
+    def fake_discover(query, max_results=5, timeout=15.0):
+        return [f"https://{query}-{i}.example.com" for i in range(5)]
+
+    with patch("bie.discovery.discover_urls", side_effect=fake_discover):
+        urls = discover_urls_multi(["q1", "q2", "q3"], max_results_per_query=5, max_total=4)
+
+    assert len(urls) == 4
+
+
+def test_discover_urls_multi_empty_queries():
+    with patch("bie.discovery.discover_urls", return_value=[]):
+        urls = discover_urls_multi([], max_results_per_query=5, max_total=10)
     assert urls == []

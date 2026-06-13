@@ -41,12 +41,17 @@ class Crawler:
     def __init__(self, settings: BIESettings | None = None) -> None:
         self.settings = settings or BIESettings()
 
-    def crawl(self, urls: list[str], allowed_domains: list[str] | None = None) -> list[Document]:
+    def crawl(
+        self, urls: list[str], allowed_domains: list[str] | None = None, instruction: str = ""
+    ) -> list[Document]:
         """Synchronous convenience wrapper around :meth:`acrawl`."""
-        return asyncio.run(self.acrawl(urls, allowed_domains))
+        return asyncio.run(self.acrawl(urls, allowed_domains, instruction))
 
     async def acrawl(
-        self, urls: list[str], allowed_domains: list[str] | None = None
+        self,
+        urls: list[str],
+        allowed_domains: list[str] | None = None,
+        instruction: str = "",
     ) -> list[Document]:
         if not urls:
             return []
@@ -68,6 +73,7 @@ class Crawler:
         spider.allowed_domains = allowed_domains
         spider.max_pages = self.settings.max_pages
         spider.max_depth = self.settings.max_depth
+        spider.instruction = instruction
 
         collector = _CollectorPipeline()
 

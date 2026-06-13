@@ -2,10 +2,19 @@
 BIE — BitSearch Intelligence Engine
 =====================================
 
-A real-time web search engine for AI applications — built on top of
-**Bitscrape** (https://pypi.org/project/bitscrape/). Give it a query,
-get ranked, cited results from the live internet. No API keys, no
-subscriptions, no third-party search services.
+A real-time web search engine and crawling toolkit for AI applications —
+built on top of **Bitscrape** (https://pypi.org/project/bitscrape/). No
+API keys, no subscriptions, no third-party search services.
+
+Core primitives
+----------------
+
+- :func:`websearch` — search the live internet for a query (no URLs needed)
+- :func:`search` — crawl + rank specific URLs against a query
+- :func:`extract` — get clean Markdown from a single URL
+- :func:`map_site` — discover a site's sitemap before crawling
+- :func:`crawl_site` — crawl a site guided by a natural-language instruction
+- :class:`BIE` — build a persistent, queryable index
 
 Quick start
 -----------
@@ -20,18 +29,19 @@ Quick start
         print(r.title, r.url)
         print(r.snippet)
 
-You can also search specific sites you already know about::
+    # Get clean markdown from a specific page
+    page = bie.extract("https://example.com/article")
+    print(page.markdown)
 
-    results = bie.search("latest semiconductor export rules 2026", urls=[
-        "https://www.reuters.com/technology/",
-        "https://www.bloomberg.com/technology",
-    ])
+    # Discover a site's structure before crawling
+    sitemap = bie.map_site("https://example.com")
+    print(sitemap.urls[:10])
 
-Or build a persistent index you can query repeatedly::
-
-    engine = bie.BIE()
-    engine.crawl(["https://example.com"])
-    hits = engine.search("example query", top_k=5)
+    # Crawl a site guided by an instruction
+    engine, results = bie.crawl_site(
+        ["https://docs.example.com"],
+        instruction="authentication and rate limits",
+    )
 
 Run as a server::
 
@@ -46,10 +56,14 @@ from __future__ import annotations
 
 from bie.config import BIESettings
 from bie.engine import BIE
+from bie.extract import ExtractError, ExtractResult, extract
 from bie.models import Document, SearchResult
 from bie.quicksearch import search, websearch
+from bie.security import SecurityFinding, SecurityReport, scan_for_prompt_injection
+from bie.sitecrawl import crawl_site
+from bie.sitemap import SiteMap, map_site
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "BIE",
@@ -58,5 +72,14 @@ __all__ = [
     "SearchResult",
     "search",
     "websearch",
+    "extract",
+    "ExtractResult",
+    "ExtractError",
+    "map_site",
+    "SiteMap",
+    "crawl_site",
+    "scan_for_prompt_injection",
+    "SecurityReport",
+    "SecurityFinding",
     "__version__",
 ]

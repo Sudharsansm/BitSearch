@@ -3,46 +3,72 @@
 [![PyPI](https://img.shields.io/pypi/v/bits-bie.svg)](https://pypi.org/project/bits-bie/)
 [![Python](https://img.shields.io/pypi/pyversions/bits-bie.svg)](https://pypi.org/project/bits-bie/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Built on BitS](https://img.shields.io/badge/built%20on-Bitscrape-orange.svg)](https://github.com/Sudharsansm/Bitscrape)
+[![Built on Bitscrape](https://img.shields.io/badge/built%20on-Bitscrape-orange.svg)](https://github.com/Sudharsansm/Bitscrape)
 
-**A real-time web search engine for AI applications — no API keys, no
-subscriptions, no third-party search services.**
+**A real-time web search and crawling toolkit for AI applications — no
+API keys, no subscriptions, no third-party search services.**
 
-BIE discovers relevant pages on the live internet using free, public
-search endpoints, crawls them (powered by
-[**BitS**](https://pypi.org/project/bitscrape/), our
-high-performance async crawler), builds a hybrid **BM25 + semantic
-vector** index in memory, and returns ranked, source-attributed results —
-all from a single Python call, REST endpoint, CLI command, or
-[MCP](https://modelcontextprotocol.io) tool.
+BIE gives any LLM, RAG pipeline, or AI agent five core primitives —
+**search, extract, map, crawl, and a hybrid index** — all running locally
+on top of [**Bitscrape**](https://pypi.org/project/bitscrape/), our
+async crawling framework. Use it as a Python library, REST API, CLI, or
+[MCP](https://modelcontextprotocol.io) server.
 
 ```python
 import bie
 
 # Search the live internet — no URLs, no API key, no subscription
 results = bie.websearch("latest semiconductor export rules 2026")
-
 for r in results:
     print(r.title, "—", r.url, f"(score={r.score:.3f})")
     print(r.snippet)
+
+# Get clean markdown from a specific page
+page = bie.extract("https://example.com/article")
+print(page.markdown)
 ```
 
 ---
 
-## Why BIE?
+## Honest scope
 
-- 🌐 **Free, real-time web search** — no API keys, no subscriptions, no
-  third-party search providers. Discovery uses public, no-key search
-  endpoints with automatic fallback.
-- 🚀 **Zero infra** — no Elasticsearch, no Milvus, no Kafka. Pure Python,
-  in-memory hybrid index. Scale up later if you need to.
-- 🧠 **Hybrid retrieval out of the box** — BM25 lexical search fused with
-  sentence-transformer embeddings via Reciprocal Rank Fusion.
-- 🤖 **MCP-ready** — drop-in tool for Claude Desktop, Claude Code, and any
-  MCP-compatible AI app.
-- ⚡ **Powered by Bitscrape** — async, polite (robots.txt-aware), and fast
-  crawling/extraction under the hood.
-- 🔌 **Use anywhere** — Python library, REST API, CLI, or MCP server.
+BIE is built to be a genuinely useful, self-hosted web search/extraction
+toolkit — and we'd rather be upfront about what that means than oversell
+it:
+
+- **What's real**: working search (free public discovery + Bitscrape
+  crawl + hybrid BM25/vector ranking with query fan-out), Markdown
+  extraction with JS-rendering fallback, sitemap-based site mapping,
+  instruction-guided crawling, a prompt-injection heuristic scanner, and
+  REST/CLI/MCP/LangChain integrations — all of it runs today, with no
+  paid dependencies.
+- **What it isn't**: a replacement for web-scale search infrastructure.
+  BIE doesn't have its own crawled index of the internet — discovery
+  relies on free public search endpoints (which can rate-limit), and
+  relevance ranking is BM25+embeddings, not a model tuned on years of
+  query logs. "Crawl guided by natural language" means *keyword-relevance
+  link prioritization*, not an LLM reading every page. The
+  prompt-injection scanner is a pattern-matching heuristic, not a
+  guarantee.
+
+If your use case needs guaranteed uptime, massive scale, or
+state-of-the-art ranking, a commercial search API may still be the right
+choice for that piece. BIE is for teams that want a capable, free,
+self-hosted starting point — and full control over the code.
+
+---
+
+## Core primitives
+
+| Function | What it does |
+|---|---|
+| `bie.websearch(query)` | Search the live internet — no URLs needed. Free discovery (DuckDuckGo + Bing fallback) with query fan-out, crawled and ranked by BIE's hybrid index. |
+| `bie.extract(url)` | Fetch a URL and return clean Markdown, with nav/ads/scripts stripped. Optional JS rendering via Playwright. |
+| `bie.map_site(url)` | Discover a site's sitemap(s) and the URLs they list, before crawling. |
+| `bie.crawl_site(urls, instruction=...)` | Crawl a site, prioritizing links by keyword-relevance to your instruction. Returns an index + ranked results. |
+| `bie.search(query, urls=...)` | Crawl specific URLs and rank their content against a query. |
+| `bie.BIE()` | Build a persistent, queryable hybrid index across multiple crawls. |
+| `bie.scan_for_prompt_injection(text)` | Heuristic scan for prompt-injection patterns in crawled content. |
 
 ---
 
@@ -52,9 +78,9 @@ for r in results:
 pip install bits-bie
 ```
 
-> Note: the PyPI **distribution** is named `bits-bie` (since `bie`
-> was too similar to an existing PyPI project), but you still
-> `import bie` and run the `bie` CLI command — same API as shown below.
+> Note: the PyPI **distribution** is named `bits-bie` (since `bie` was
+> too similar to an existing PyPI project), but you still `import bie`
+> and run the `bie` CLI command — same API as shown below.
 
 Optional extras:
 
@@ -62,6 +88,8 @@ Optional extras:
 pip install "bits-bie[embeddings]"  # semantic/vector search (sentence-transformers)
 pip install "bits-bie[server]"      # FastAPI + Uvicorn REST server
 pip install "bits-bie[mcp]"         # Model Context Protocol server
+pip install "bits-bie[render]"      # JS rendering for extract() via Playwright
+pip install "bits-bie[langchain]"   # LangChain tool adapters
 pip install "bits-bie[all]"         # everything
 ```
 
@@ -73,7 +101,7 @@ pip install "bits-bie[all]"         # everything
 
 ## Usage
 
-### 0. Search the live internet — no URLs, no API key, no subscription
+### 1. Search the live internet — no URLs, no API key, no subscription
 
 ```python
 import bie
@@ -84,30 +112,82 @@ for r in results:
     print(r.snippet)
 ```
 
-This is BIE's primary, "type a question, get a real-time answer from the
-internet" mode. It:
+`websearch` pipeline:
 
-1. Discovers candidate URLs for your query via free, public, no-key
-   search endpoints (DuckDuckGo, with an automatic Bing fallback for
-   reliability)
-2. Crawls them with Bitscrape
-3. Extracts and chunks the page text, then ranks it against your query
-   with BIE's hybrid BM25 + vector index
+1. **Discovery** — free, public, no-key search endpoints (DuckDuckGo,
+   with an automatic Bing fallback). By default, several phrasings of
+   your query are searched and merged (`fanout=True`) for better recall.
+2. **Crawl** — discovered URLs are crawled with Bitscrape.
+3. **Rank** — extracted content is chunked and ranked against your query
+   with BIE's hybrid BM25 + vector index.
+4. **Security filter** — results whose matched text trips the
+   prompt-injection heuristic (`bie.security`) are dropped by default.
 
-No accounts, no API keys, no rate-limited paid tiers — everything runs
-locally using publicly accessible search and the Bitscrape crawler.
+Useful options: `top_k`, `discovery_results`, `fanout`,
+`max_query_variants`, `deep`, `scan_security`, `use_embeddings`.
 
-### 1. One-shot search of specific sites (Python)
+### 2. Extract — clean Markdown from a specific URL
 
 ```python
-import bie
+page = bie.extract("https://example.com/article")
+print(page.title)
+print(page.markdown)
+print(page.word_count)
 
+# For JS-rendered (SPA) pages:
+page = bie.extract("https://app.example.com", render_js=True)  # requires bie[render]
+```
+
+If a static fetch returns suspiciously little text, `extract` raises
+`ExtractError` suggesting `render_js=True` rather than silently returning
+near-empty content.
+
+Every result includes `page.security` — a `SecurityReport` flagging
+prompt-injection-like patterns in the extracted text (see
+[Security](#security) below).
+
+### 3. Map — discover a site's structure before crawling
+
+```python
+sitemap = bie.map_site("https://example.com")
+print(sitemap.sitemap_urls)        # which sitemap files were found
+print(len(sitemap.urls))           # how many pages they list
+print(sitemap.filter(r"/blog/"))   # just the blog URLs
+```
+
+Based on the sitemaps.org protocol: reads `robots.txt` for `Sitemap:`
+directives, falls back to `/sitemap.xml`, and recursively expands sitemap
+indexes.
+
+### 4. Crawl — guided by a natural-language instruction
+
+```python
+engine, results = bie.crawl_site(
+    ["https://docs.example.com"],
+    instruction="authentication and rate limits",
+    max_pages=30,
+    max_depth=2,
+)
+for r in results:
+    print(r.title, r.url)
+
+# Re-query the same crawled index without re-crawling:
+more = engine.search("error codes")
+```
+
+Outgoing links are ranked by keyword overlap between your instruction and
+each link's anchor text + URL path — a fast heuristic that biases the
+crawl toward relevant pages without an LLM call per page.
+
+### 5. Search specific sites (no live-web discovery)
+
+```python
 results = bie.search("AI regulation news", urls=["https://example.com/news"], top_k=5)
 for r in results:
     print(r)
 ```
 
-### 2. Build a reusable index
+### 6. Build a reusable index
 
 ```python
 from bie import BIE
@@ -117,30 +197,28 @@ engine.crawl(["https://example.com/blog", "https://another-site.com"])
 
 print(engine.search("quarterly earnings"))
 print(engine.search("product launch"))  # reuses the same index
+
+# Index your own text (no crawling):
+engine.add_text(url="internal://doc-1", title="Q2 Memo", text="...", trust_score=1.0)
 ```
 
-### 3. Index your own text (no crawling)
-
-```python
-engine.add_text(
-    url="internal://doc-1",
-    title="Q2 Strategy Memo",
-    text="...",
-    trust_score=1.0,
-)
-```
-
-### 4. CLI
+### 7. CLI
 
 ```bash
-# Search the whole internet — no URLs needed
+# Search the live internet — no URLs needed
 bie search-live "who won the latest F1 race"
+
+# Clean markdown from a URL
+bie extract https://example.com/article
+
+# Discover a site's sitemap
+bie map https://example.com --filter "/blog/"
+
+# Crawl, guided by an instruction
+bie crawl https://docs.example.com --instruction "authentication and rate limits" --max-pages 30
 
 # Crawl + search specific sites in one command
 bie search "global markets today" --url https://www.bbc.com/news --top-k 5
-
-# Just crawl & dump extracted pages
-bie crawl https://example.com --max-pages 20 --out docs.jsonl
 
 # Run the REST API
 bie serve --port 8000
@@ -149,29 +227,37 @@ bie serve --port 8000
 bie mcp
 ```
 
-### 5. REST API
+### 8. REST API
 
 ```bash
 bie serve --port 8000
 ```
 
 ```bash
+curl -X POST http://localhost:8000/search/live \
+  -H "Content-Type: application/json" \
+  -d '{"query": "who won the latest F1 race", "top_k": 5}'
+
+curl -X POST http://localhost:8000/extract \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com/article"}'
+
+curl -X POST http://localhost:8000/map \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://example.com"}'
+
 curl -X POST http://localhost:8000/crawl/url \
   -H "Content-Type: application/json" \
-  -d '{"urls": ["https://example.com/news"]}'
+  -d '{"urls": ["https://example.com/news"], "instruction": "pricing pages"}'
 
 curl -X POST http://localhost:8000/search \
   -H "Content-Type: application/json" \
   -d '{"query": "latest news", "top_k": 5}'
-
-curl -X POST http://localhost:8000/search/live \
-  -H "Content-Type: application/json" \
-  -d '{"query": "who won the latest F1 race", "top_k": 5}'
 ```
 
 See the full endpoint contract in [`docs/API.md`](docs/API.md).
 
-### 6. MCP (Model Context Protocol)
+### 9. MCP (Model Context Protocol)
 
 Add BIE as a tool in your MCP client (e.g. `claude_desktop_config.json`):
 
@@ -186,12 +272,47 @@ Add BIE as a tool in your MCP client (e.g. `claude_desktop_config.json`):
 }
 ```
 
-This exposes four tools to your AI assistant:
+This exposes six tools to your AI assistant:
 
-- `bie_web_search(query, top_k, deep)` — search the entire web, no URLs needed (DuckDuckGo discovery + Bitscrape crawl, no API key)
-- `bie_search(query, urls, top_k, max_pages)` — crawl + search specific URLs in one call
-- `bie_crawl(urls, max_pages)` — crawl & index into a session-persistent store
+- `bie_web_search(query, top_k, deep)` — search the live internet, no URLs needed
+- `bie_extract(url, render_js)` — fetch a URL as clean Markdown
+- `bie_map(url, filter_pattern)` — discover a site's sitemap
+- `bie_search(query, urls, top_k, max_pages)` — crawl + search specific URLs
+- `bie_crawl(urls, max_pages, instruction)` — crawl & index into a session-persistent store
 - `bie_index_search(query, top_k)` — search the session index
+
+### 10. LangChain
+
+```python
+from bie.integrations.langchain import get_tools
+
+tools = get_tools()  # [bie_websearch, bie_extract, bie_crawl_site]
+# pass `tools` to your LangChain/LangGraph agent
+```
+
+Requires `pip install "bits-bie[langchain]"`.
+
+---
+
+## Security
+
+BIE includes `bie.scan_for_prompt_injection(text)` — a pattern-based
+heuristic that flags text likely to contain instructions aimed at an LLM
+(e.g. "ignore previous instructions...", fake `SYSTEM:` blocks, requests
+to reveal a system prompt).
+
+- `bie.extract()` attaches a `SecurityReport` to every result
+  (`result.security`).
+- `bie.websearch()` drops results whose matched chunk trips the
+  heuristic by default (`scan_security=True`).
+
+**This is a signal, not a guarantee.** It catches common, unobfuscated
+injection phrasing in crawled web content — it will not catch everything,
+and legitimate pages *discussing* prompt injection may occasionally be
+flagged. Treat `flagged=True` as "review before feeding this directly
+into a high-privilege agent context," not as "this content is dangerous"
+or "unflagged content is safe." See `bie/security.py` for the full pattern
+list and caveats.
 
 ---
 
@@ -229,23 +350,25 @@ engine = BIE(BIESettings(
 ## Architecture
 
 ```
-              ┌─────────────────────────────────────────┐
-              │                  bie                     │
-              │                                           │
-   urls ──▶   │  Crawler (Bitscrape)                     │
-              │     │                                     │
-              │     ▼                                     │
-              │  Document → Chunker → HybridIndex         │
-              │                         │   │             │
-              │                  BM25Index  VectorIndex   │
-              │                         │   │             │
-              │                       Fusion (RRF)        │
-              │                         │                 │
-   query ──▶  │                         ▼                 │
-              │                  Ranked SearchResults      │
-              └─────────────────────────────────────────┘
-                     │            │            │
-                  Python API   REST API    MCP Server
+              ┌─────────────────────────────────────────────────┐
+              │                       bie                        │
+              │                                                   │
+   query ──▶  │  discovery (DuckDuckGo/Bing) ──▶ query fan-out    │
+              │           │                                       │
+   urls ──▶   │           ▼                                       │
+              │  Crawler (Bitscrape) ──▶ Document ──▶ Chunker      │
+              │           │                            │          │
+              │           │                            ▼          │
+              │           │                      HybridIndex      │
+              │           │                     BM25 + Vector      │
+              │           │                       (RRF fusion)     │
+              │           ▼                            │          │
+              │     extract()/map()         Ranked SearchResults   │
+              │      (standalone)                      │          │
+              │                                security scan       │
+              └─────────────────────────────────────────────────┘
+                     │            │            │            │
+                  Python API   REST API    MCP Server   LangChain
 ```
 
 This OSS edition implements the core of the BIE PRD's **Module 1
@@ -262,8 +385,7 @@ for Elasticsearch/Milvus-backed implementations behind the same
 BIE's crawling and extraction layer is powered by
 [**BitS**](https://github.com/Sudharsansm/Bitscrape)
 (`pip install bitscrape`), our async, robots.txt-aware web scraping
-framework — giving BIE high-performance, polite, production-grade crawling
-out of the box.
+framework — giving BIE high-performance, polite crawling out of the box.
 
 ---
 

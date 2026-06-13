@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bits-bie"
-version = "1.1.0"
-description = "*BitS* BitSearch Intelligence Engine — real-time, citation-backed web search & extraction for AI apps. Built on BitS."
+version = "1.2.0"
+description = "*BitS* BitSearch Intelligence Engine — real-time, citation-backed web search & extraction for AI apps. Built on Bitscrape."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -29,7 +29,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
@@ -42,6 +41,9 @@ dependencies = [
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "click>=8.0",
+    "httpx>=0.27",
+    "markdownify>=0.13",
+    "selectolax>=0.3",
 ]
 
 [project.optional-dependencies]
@@ -55,8 +57,14 @@ server = [
 mcp = [
     "mcp>=1.0",
 ]
+render = [
+    "playwright>=1.40",
+]
+langchain = [
+    "langchain-core>=0.2",
+]
 all = [
-    "bits-bie[embeddings,server,mcp]",
+    "bits-bie[embeddings,server,mcp,render,langchain]",
 ]
 dev = [
     "pytest>=8.0",
@@ -78,7 +86,7 @@ packages = ["bie"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

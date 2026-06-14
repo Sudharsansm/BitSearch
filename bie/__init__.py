@@ -70,7 +70,7 @@ try:
     __version__ = _metadata.version("bits-bie")
 except _metadata.PackageNotFoundError:
     # Editable/source checkout without installed metadata.
-    __version__ = "1.2.3"
+    __version__ = "1.2.4"
 
 __all__ = [
     "BIE",

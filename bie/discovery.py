@@ -190,6 +190,11 @@ def _get_configured_backends() -> list[str]:
     return names or list(_DEFAULT_BACKENDS)
 
 
+# Alias kept for backwards compatibility with callers/tests that use the
+# shorter name.
+_configured_backends = _get_configured_backends
+
+
 def discover_urls(
     query: str,
     max_results: int = 5,

@@ -73,8 +73,33 @@ class BIE:
                 details.
 
         Returns the number of documents added.
+
+        This is safe to call from plain scripts, servers, *and*
+        Jupyter/Colab notebooks — see :meth:`acrawl` for a native
+        ``async``/``await`` alternative if you're already inside a
+        coroutine.
         """
         documents = self.crawler.crawl(
+            urls, allowed_domains=allowed_domains, instruction=instruction
+        )
+        for doc in documents:
+            self.add_document(doc)
+        return len(documents)
+
+    async def acrawl(
+        self,
+        urls: list[str],
+        allowed_domains: list[str] | None = None,
+        instruction: str = "",
+    ) -> int:
+        """Async equivalent of :meth:`crawl`.
+
+        Prefer this inside notebooks or other code that's already running
+        in an ``async`` context (e.g. ``await engine.acrawl(urls)``) —
+        it avoids the extra thread/``nest_asyncio`` machinery that
+        :meth:`crawl` uses to stay safe when called from sync code.
+        """
+        documents = await self.crawler.acrawl(
             urls, allowed_domains=allowed_domains, instruction=instruction
         )
         for doc in documents:

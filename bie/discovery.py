@@ -5,36 +5,56 @@ This module answers the question: *"given a query, what URLs on the
 internet are relevant right now?"* — without requiring any paid API,
 subscription, or API key.
 
-It tries multiple lightweight, no-JS public search endpoints in order,
+It tries multiple lightweight, no-JS public search endpoints **in order**,
 falling back automatically if one is blocked, rate-limited, or returns
-no results. The default order is:
+no results:
 
   1. DuckDuckGo HTML  (``https://html.duckduckgo.com/html/``)
   2. DuckDuckGo Lite  (``https://lite.duckduckgo.com/lite/``)
   3. Bing HTML        (``https://www.bing.com/search``)
+
+A fourth backend, ``searxng``, can be enabled to query a self-hosted
+`SearXNG <https://github.com/searxng/searxng>`_ instance — this is the
+most reliable no-API-key option, since it isn't subject to the same
+rate-limiting / bot-detection / HTML-layout churn as scraping DDG/Bing
+directly.
+
+The set and order of backends is configurable via the ``BIE_DISCOVERY_BACKENDS``
+environment variable (or the ``backends=`` argument), e.g.::
+
+    export BIE_DISCOVERY_BACKENDS=searxng,ddg_html,ddg_lite,bing_html
+    export BIE_SEARXNG_URL=http://localhost:8080
 
 This is the **discovery** step. BIE then crawls the discovered URLs with
 Bitscrape and ranks the extracted content with its hybrid BM25+vector
 index — giving a genuine "type a query, get a real-time answer from the
 internet" experience with zero configuration and zero cost.
 
-Configuring backends
----------------------
+Diagnostics
+-----------
+If every configured backend fails, :func:`discover_urls` still returns
+``[]`` (callers should treat this as "try again", not "no results exist"
+— see :func:`bie.quicksearch.websearch`'s fallback behaviour). However,
+it logs a single, actionable ``warning``-level message that distinguishes:
 
-Scraping search-engine HTML pages is inherently fragile: result markup
-changes, and shared/cloud IPs (CI runners, sandboxes, some notebook
-hosts) are sometimes rate-limited or blocked outright. The set and order
-of backends tried can be overridden with the ``BIE_DISCOVERY_BACKENDS``
-environment variable — a comma-separated list of backend names::
+* **network-blocked** — every backend failed at the connection level
+  (``httpx.RequestError``: connection refused, DNS failure, proxy
+  denial such as an ``x-deny-reason: host_not_allowed`` header from an
+  egress proxy, timeouts, etc.). This means *this process* cannot reach
+  the public internet (or these specific hosts) at all — check the
+  environment's network/proxy configuration.
+* **blocked / rate-limited** — backends responded with an error status
+  (commonly ``403``/``429``/``503``), suggesting the search engine is
+  rate-limiting or bot-blocking this IP. Retrying later, lowering query
+  volume, or switching to ``searxng`` usually helps.
+* **empty response** — backends returned ``200 OK`` but the page
+  contained no parseable results (e.g. a CAPTCHA/consent page, or the
+  result page's HTML structure changed). This can indicate the scraper's
+  selectors are out of date.
 
-    export BIE_DISCOVERY_BACKENDS=ddg_html,ddg_lite,bing_html,searxng
-
-Built-in backend names: ``ddg_html``, ``ddg_lite``, ``bing_html``.
-
-To add a self-hosted `SearXNG <https://docs.searxng.org/>`_ instance (the
-realistic long-term fix for persistent rate-limiting), set
-``BIE_SEARXNG_URL`` to its base URL (e.g. ``http://localhost:8080``) and
-include ``searxng`` in ``BIE_DISCOVERY_BACKENDS``.
+Call :func:`get_last_discovery_diagnostics` after a failed
+:func:`discover_urls` call to inspect the per-backend failure details
+programmatically (e.g. to surface a more specific error to end users).
 """
 
 from __future__ import annotations
@@ -42,7 +62,10 @@ from __future__ import annotations
 import logging
 import os
 import re
-from urllib.parse import parse_qs, unquote, urlparse
+import threading
+from collections import Counter
+from dataclasses import dataclass, field
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
 
@@ -66,253 +89,253 @@ _BLOCKED_HOST_FRAGMENTS = (
 
 _DEFAULT_BACKENDS = ("ddg_html", "ddg_lite", "bing_html")
 
-_ENV_BACKENDS = "BIE_DISCOVERY_BACKENDS"
-_ENV_SEARXNG_URL = "BIE_SEARXNG_URL"
+# Categories used in BackendFailure.category — see module docstring.
+NETWORK_BLOCKED = "network_blocked"
+BLOCKED_OR_RATE_LIMITED = "blocked_or_rate_limited"
+EMPTY_RESPONSE = "empty_response"
+UNKNOWN_BACKEND = "unknown_backend"
+NOT_CONFIGURED = "not_configured"
+OTHER_ERROR = "other_error"
 
 
-class DiscoveryError(RuntimeError):
-    """Raised by :func:`discover_urls` callers that opt into strict mode
-    (not raised by :func:`discover_urls` itself, which always returns a
-    list — see its docstring). Exposed for callers that want to
-    distinguish failure categories programmatically; see
-    :class:`BackendFailure`.
-    """
-
-
+@dataclass(frozen=True)
 class BackendFailure:
-    """Records why a single discovery backend attempt did not produce URLs.
+    """Diagnostic record for why a single discovery backend failed."""
 
-    Attributes:
-        backend: Backend name (e.g. ``"ddg_html"``).
-        category: One of:
-            - ``"network_blocked"`` — the request itself failed before a
-              response was received (connection error, timeout, DNS
-              failure, or a proxy/firewall denial). This usually means
-              the *environment* can't reach the backend at all (e.g. a
-              sandboxed proxy with an `x-deny-reason: host_not_allowed`
-              style policy, or no internet access).
-            - ``"http_error"`` — a response was received but with an
-              error status code (403, 429, 5xx). Often rate-limiting or
-              IP-based blocking.
-            - ``"empty_response"`` — a 2xx response was received, but it
-              contained no parseable results (e.g. a CAPTCHA/consent page,
-              or a markup change this parser doesn't handle).
-        detail: Human-readable detail (exception message or status code).
+    backend: str
+    category: str
+    detail: str
+
+
+@dataclass
+class DiscoveryDiagnostics:
+    """Per-call diagnostics from the most recent :func:`discover_urls`."""
+
+    query: str = ""
+    failures: list[BackendFailure] = field(default_factory=list)
+    succeeded_backend: str | None = None
+
+    @property
+    def all_failed(self) -> bool:
+        return self.succeeded_backend is None
+
+    def category_counts(self) -> Counter:
+        return Counter(f.category for f in self.failures)
+
+    def summary(self) -> str:
+        """A short, human-readable diagnosis of why discovery failed."""
+        if not self.all_failed:
+            return f"backend '{self.succeeded_backend}' returned results"
+        if not self.failures:
+            return "no backends were attempted"
+
+        counts = self.category_counts()
+        total = len(self.failures)
+        details = "; ".join(f"{f.backend}={f.category} ({f.detail})" for f in self.failures)
+
+        if counts.get(NETWORK_BLOCKED, 0) == total:
+            return (
+                "All discovery backends failed at the network/connection level "
+                f"({details}). This process cannot reach these search endpoints "
+                "at all — check outbound network/proxy/firewall configuration "
+                "for this environment (sandboxes often allowlist only specific "
+                "domains). This is an environment issue, not a BIE bug."
+            )
+        if counts.get(BLOCKED_OR_RATE_LIMITED, 0) == total:
+            return (
+                "All discovery backends responded but refused the request "
+                f"({details}). This usually means the search engine is "
+                "rate-limiting or bot-blocking this IP. Try again later, "
+                "reduce request volume, or configure a 'searxng' backend "
+                "via BIE_DISCOVERY_BACKENDS / BIE_SEARXNG_URL."
+            )
+        if counts.get(EMPTY_RESPONSE, 0) == total:
+            return (
+                "All discovery backends returned 200 OK but no parseable "
+                f"results ({details}). This often means a CAPTCHA/consent "
+                "page was served instead of results, or the result page's "
+                "HTML structure changed."
+            )
+        return f"All discovery backends failed with mixed errors: {details}"
+
+
+_diagnostics_lock = threading.Lock()
+_last_diagnostics = DiscoveryDiagnostics()
+
+
+def get_last_discovery_diagnostics() -> DiscoveryDiagnostics:
+    """Return diagnostics for the most recent :func:`discover_urls` call.
+
+    Useful after ``discover_urls(...)`` returns ``[]`` to find out *why*
+    (network-blocked vs. rate-limited vs. empty/CAPTCHA response) without
+    needing to enable debug logging.
+
+    Note: not safe to rely on across concurrent calls from multiple
+    threads — for concurrent use, parse :func:`discover_urls`'s log
+    output, or call discovery from a single thread/queue.
     """
-
-    __slots__ = ("backend", "category", "detail")
-
-    def __init__(self, backend: str, category: str, detail: str) -> None:
-        self.backend = backend
-        self.category = category
-        self.detail = detail
-
-    def __repr__(self) -> str:  # pragma: no cover - convenience only
-        return f"BackendFailure(backend={self.backend!r}, category={self.category!r}, detail={self.detail!r})"
+    with _diagnostics_lock:
+        return _last_diagnostics
 
 
-def _configured_backends() -> list[str]:
-    raw = os.environ.get(_ENV_BACKENDS, "")
-    if not raw.strip():
-        return list(_DEFAULT_BACKENDS)
+def _get_configured_backends() -> list[str]:
+    """Read the ordered backend list from ``BIE_DISCOVERY_BACKENDS``
+    (comma-separated), falling back to the built-in default order.
+    Unknown names are kept (and reported as ``unknown_backend`` failures
+    at call time) rather than silently dropped, so misconfiguration is
+    visible.
+    """
+    raw = os.environ.get("BIE_DISCOVERY_BACKENDS", "")
     names = [n.strip() for n in raw.split(",") if n.strip()]
     return names or list(_DEFAULT_BACKENDS)
 
 
 def discover_urls(
-    query: str, max_results: int = 5, timeout: float = 15.0
+    query: str,
+    max_results: int = 5,
+    timeout: float = 15.0,
+    backends: list[str] | None = None,
 ) -> list[str]:
     """Return up to ``max_results`` candidate URLs for ``query`` from the
     live web — no API key required.
 
-    Tries each backend in :func:`_configured_backends` order (default:
-    DuckDuckGo HTML, DuckDuckGo Lite, Bing HTML — see module docstring for
-    how to configure this via ``BIE_DISCOVERY_BACKENDS``).
+    Tries each backend in ``backends`` (default: the
+    ``BIE_DISCOVERY_BACKENDS`` env var, or ``ddg_html,ddg_lite,bing_html``)
+    in order, stopping at the first one that returns usable results.
 
     Args:
         query: The natural-language search query.
         max_results: Maximum number of URLs to return.
         timeout: HTTP request timeout in seconds (per attempt).
+        backends: Optional explicit ordered list of backend names,
+            overriding ``BIE_DISCOVERY_BACKENDS``. Built-in names:
+            ``"ddg_html"``, ``"ddg_lite"``, ``"bing_html"``, ``"searxng"``
+            (the latter requires ``BIE_SEARXNG_URL`` to be set).
 
     Returns:
         A list of absolute, deduplicated URLs in result order. Returns an
-        empty list only if every configured backend fails — callers
-        should treat this as "try again, or check connectivity" rather
-        than "no results exist for this query". When this happens, a
-        ``WARNING``-level log message summarizes *why* each backend
-        failed (see :func:`discover_urls_detailed` for the structured
-        version of this information).
-    """
-    urls, _failures = discover_urls_detailed(query, max_results=max_results, timeout=timeout)
-    return urls
-
-
-def discover_urls_detailed(
-    query: str, max_results: int = 5, timeout: float = 15.0
-) -> tuple[list[str], list[BackendFailure]]:
-    """Like :func:`discover_urls`, but also returns structured
-    :class:`BackendFailure` records for every backend that didn't produce
-    results — useful for diagnostics (e.g. distinguishing "network
-    blocked" from "got a CAPTCHA page").
-
-    Returns:
-        ``(urls, failures)``. ``urls`` is empty only if every backend
-        failed; ``failures`` has one entry per attempted backend that
-        didn't return usable results (it's empty if the first backend
-        tried succeeded).
+        empty list only if every backend fails — callers should treat this
+        as "try again" rather than "no results exist". Call
+        :func:`get_last_discovery_diagnostics` to find out why.
     """
     headers = {
         "User-Agent": _USER_AGENT,
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    backend_fns: dict[str, tuple] = {
-        "ddg_html": (_fetch_ddg_html, "POST https://html.duckduckgo.com/html/"),
-        "ddg_lite": (_fetch_ddg_lite, "POST https://lite.duckduckgo.com/lite/"),
-        "bing_html": (_fetch_bing_html, "GET https://www.bing.com/search"),
-        "searxng": (_fetch_searxng, "GET <BIE_SEARXNG_URL>/search"),
-    }
+    backend_names = backends if backends is not None else _get_configured_backends()
+    diagnostics = DiscoveryDiagnostics(query=query)
 
-    failures: list[BackendFailure] = []
-
-    for name in _configured_backends():
-        entry = backend_fns.get(name)
-        if entry is None:
+    for name in backend_names:
+        fetch_name = _BACKEND_FETCHER_NAMES.get(name)
+        if fetch_name is None:
             logger.warning(
-                "Unknown discovery backend %r in %s — skipping. Known backends: %s",
+                "Discovery backend %r is not recognized — skipping. "
+                "Known backends: %s",
                 name,
-                _ENV_BACKENDS,
-                ", ".join(backend_fns),
+                ", ".join(_BACKEND_FETCHER_NAMES),
+            )
+            diagnostics.failures.append(
+                BackendFailure(name, UNKNOWN_BACKEND, "not a recognized backend name")
             )
             continue
 
-        fetch, description = entry
+        if name == "searxng" and not os.environ.get("BIE_SEARXNG_URL"):
+            logger.warning(
+                "Discovery backend 'searxng' is configured but BIE_SEARXNG_URL "
+                "is not set — skipping. Set it to your SearXNG instance's base "
+                "URL, e.g. BIE_SEARXNG_URL=http://localhost:8080"
+            )
+            diagnostics.failures.append(
+                BackendFailure(name, NOT_CONFIGURED, "BIE_SEARXNG_URL is not set")
+            )
+            continue
 
         try:
+            fetch = globals()[fetch_name]
             with httpx.Client(timeout=timeout, headers=headers, follow_redirects=True) as client:
                 html = fetch(client, query)
         except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            failure = BackendFailure(
-                backend=name,
-                category="http_error",
-                detail=f"{description} -> HTTP {status}",
-            )
-            failures.append(failure)
-            logger.warning(
-                "Discovery backend %s returned HTTP %s (likely rate-limiting or "
-                "IP-based blocking): %s",
-                name,
-                status,
-                exc,
-            )
+            category, detail = _categorize_status_error(exc)
+            logger.warning("Discovery backend %s failed: %s (%s)", name, detail, category)
+            diagnostics.failures.append(BackendFailure(name, category, detail))
             continue
-        except httpx.HTTPError as exc:
-            # Connection-level failure: DNS error, connection refused/reset,
-            # TLS error, timeout, or — in sandboxed environments — a proxy
-            # denial (e.g. `x-deny-reason: host_not_allowed`) that httpx
-            # surfaces as a connection error before any HTTP response.
-            failure = BackendFailure(
-                backend=name,
-                category="network_blocked",
-                detail=f"{description} -> {type(exc).__name__}: {exc}",
-            )
-            failures.append(failure)
+        except httpx.RequestError as exc:
+            detail = f"{type(exc).__name__}: {exc}"
             logger.warning(
-                "Discovery backend %s could not be reached at all "
-                "(%s: %s). This usually means the network/proxy in this "
-                "environment blocks access to this host, not that the "
-                "backend itself is down.",
+                "Discovery backend %s failed at the connection level: %s. "
+                "If this is unexpected, check outbound network/proxy access "
+                "to this host from this environment.",
                 name,
-                type(exc).__name__,
-                exc,
+                detail,
             )
+            diagnostics.failures.append(BackendFailure(name, NETWORK_BLOCKED, detail))
             continue
-        except ValueError as exc:
-            # e.g. searxng misconfigured (no BIE_SEARXNG_URL)
-            failure = BackendFailure(backend=name, category="config_error", detail=str(exc))
-            failures.append(failure)
-            logger.warning("Discovery backend %s is misconfigured: %s", name, exc)
+        except Exception as exc:  # noqa: BLE001 - never let one backend crash discovery
+            detail = f"{type(exc).__name__}: {exc}"
+            logger.warning("Discovery backend %s raised an unexpected error: %s", name, detail)
+            diagnostics.failures.append(BackendFailure(name, OTHER_ERROR, detail))
             continue
 
         if not html:
-            failures.append(
-                BackendFailure(backend=name, category="empty_response", detail="empty body")
+            diagnostics.failures.append(
+                BackendFailure(name, EMPTY_RESPONSE, "response body was empty")
             )
             continue
 
         urls = _parse_result_urls(html, max_results)
         if urls:
             logger.debug("Discovery backend %s returned %d url(s)", name, len(urls))
-            return urls, failures
+            diagnostics.succeeded_backend = name
+            _set_last_diagnostics(diagnostics)
+            return urls
 
-        # Got a 2xx response, but no results parsed out of it — most
-        # likely a CAPTCHA/consent page, or a markup change.
-        failures.append(
+        diagnostics.failures.append(
             BackendFailure(
-                backend=name,
-                category="empty_response",
-                detail=(
-                    f"{description} returned HTTP 200 but no results could be "
-                    f"parsed (possible CAPTCHA/consent page or markup change)"
-                ),
+                name,
+                EMPTY_RESPONSE,
+                "got a 200 OK response but no results could be parsed "
+                "(possibly a CAPTCHA/consent page or changed HTML layout)",
             )
         )
-        logger.warning(
-            "Discovery backend %s returned a response but no results could be "
-            "parsed from it (possible CAPTCHA/consent page, or the result "
-            "markup has changed).",
-            name,
+
+    _set_last_diagnostics(diagnostics)
+    logger.warning(
+        "All discovery backends failed or returned no results for query=%r. %s",
+        query,
+        diagnostics.summary(),
+    )
+    return []
+
+
+def _set_last_diagnostics(diagnostics: DiscoveryDiagnostics) -> None:
+    global _last_diagnostics
+    with _diagnostics_lock:
+        _last_diagnostics = diagnostics
+
+
+def _categorize_status_error(exc: httpx.HTTPStatusError) -> tuple[str, str]:
+    """Distinguish an egress-proxy denial (e.g. a sandbox's
+    ``x-deny-reason: host_not_allowed`` header) from a genuine
+    rate-limit/bot-block response from the search engine itself.
+    """
+    response = exc.response
+    deny_reason = response.headers.get("x-deny-reason")
+    if deny_reason:
+        return (
+            NETWORK_BLOCKED,
+            f"HTTP {response.status_code}, x-deny-reason={deny_reason!r} "
+            "(this environment's egress proxy blocked the request)",
         )
-
-    if failures:
-        _log_all_failed_summary(query, failures)
-
-    return [], failures
-
-
-def _log_all_failed_summary(query: str, failures: list[BackendFailure]) -> None:
-    network_blocked = [f for f in failures if f.category == "network_blocked"]
-    empty_or_http = [f for f in failures if f.category in ("empty_response", "http_error")]
-
-    if network_blocked and not empty_or_http:
-        logger.warning(
-            "All discovery backends failed for query=%r, and every failure was a "
-            "connection-level error (%s). This strongly suggests network access "
-            "to search backends is blocked in this environment (e.g. a sandboxed "
-            "proxy, firewall, or no internet access) rather than the backends "
-            "being down. If you're in a restricted sandbox, try running this in "
-            "an environment with normal internet access (e.g. Colab, a local "
-            "machine, or a server). If this persists on a normal connection, "
-            "configure BIE_DISCOVERY_BACKENDS with a self-hosted SearXNG "
-            "instance (see bie.discovery module docs).",
-            query,
-            ", ".join(f"{f.backend}: {f.detail}" for f in network_blocked),
-        )
-    elif empty_or_http and not network_blocked:
-        logger.warning(
-            "All discovery backends failed for query=%r, but connections "
-            "succeeded — responses were empty, blocked (CAPTCHA/consent "
-            "pages), or rate-limited (%s). This usually means the backends "
-            "are reachable but the IP is being rate-limited, or their result "
-            "markup has changed. Try again later, reduce request frequency, "
-            "or configure a self-hosted SearXNG backend via "
-            "BIE_DISCOVERY_BACKENDS / BIE_SEARXNG_URL (see bie.discovery "
-            "module docs).",
-            query,
-            ", ".join(f"{f.backend}: {f.detail}" for f in empty_or_http),
-        )
-    else:
-        logger.warning(
-            "All discovery backends failed or returned no results for "
-            "query=%r (%s).",
-            query,
-            ", ".join(f"{f.backend} [{f.category}]: {f.detail}" for f in failures),
-        )
+    return (BLOCKED_OR_RATE_LIMITED, f"HTTP {response.status_code}")
 
 
 def discover_urls_multi(
-    queries: list[str], max_results_per_query: int = 5, max_total: int = 15, timeout: float = 15.0
+    queries: list[str],
+    max_results_per_query: int = 5,
+    max_total: int = 15,
+    timeout: float = 15.0,
+    backends: list[str] | None = None,
 ) -> list[str]:
     """Run :func:`discover_urls` for several query variants and merge the
     results, ranked by how many variants surfaced each URL.
@@ -329,6 +352,8 @@ def discover_urls_multi(
         max_results_per_query: How many URLs to fetch per query variant.
         max_total: Maximum number of URLs to return overall.
         timeout: Per-request timeout in seconds.
+        backends: Optional explicit ordered list of backend names, passed
+            through to each :func:`discover_urls` call.
 
     Returns:
         Deduplicated URLs, ordered by (number of variants that returned
@@ -340,7 +365,9 @@ def discover_urls_multi(
     order_counter = 0
 
     for query in queries:
-        for url in discover_urls(query, max_results=max_results_per_query, timeout=timeout):
+        for url in discover_urls(
+            query, max_results=max_results_per_query, timeout=timeout, backends=backends
+        ):
             if url not in url_votes:
                 url_votes[url] = 0
                 url_order[url] = order_counter
@@ -369,16 +396,27 @@ def _fetch_bing_html(client: httpx.Client, query: str) -> str:
     return resp.text
 
 
-def _fetch_searxng(client: httpx.Client, query: str) -> str:
-    base_url = os.environ.get(_ENV_SEARXNG_URL, "").rstrip("/")
-    if not base_url:
-        raise ValueError(
-            f"backend 'searxng' is configured in {_ENV_BACKENDS} but "
-            f"{_ENV_SEARXNG_URL} is not set"
-        )
-    resp = client.get(f"{base_url}/search", params={"q": query, "format": "json"})
+def _fetch_searxng_html(client: httpx.Client, query: str) -> str:
+    """Query a self-hosted SearXNG instance's HTML results page.
+
+    Requires ``BIE_SEARXNG_URL`` to be set to the instance's base URL
+    (e.g. ``http://localhost:8080``). SearXNG aggregates multiple search
+    engines server-side and exposes a stable HTML/JSON API, making it the
+    most reliable no-API-key discovery option when self-hosted.
+    """
+    base_url = os.environ["BIE_SEARXNG_URL"]  # presence checked by caller
+    search_url = urljoin(base_url.rstrip("/") + "/", "search")
+    resp = client.get(search_url, params={"q": query, "format": "html"})
     resp.raise_for_status()
     return resp.text
+
+
+_BACKEND_FETCHER_NAMES = {
+    "ddg_html": "_fetch_ddg_html",
+    "ddg_lite": "_fetch_ddg_lite",
+    "bing_html": "_fetch_bing_html",
+    "searxng": "_fetch_searxng_html",
+}
 
 
 def _parse_result_urls(html: str, max_results: int) -> list[str]:
@@ -388,17 +426,16 @@ def _parse_result_urls(html: str, max_results: int) -> list[str]:
       - DuckDuckGo HTML:  ``<a class="result__a" href="...">``
       - DuckDuckGo Lite:  ``<a class="result-link" href="...">``
       - Bing:             ``<li class="b_algo">...<a href="...">``
-      - SearXNG JSON:     ``{"results": [{"url": "..."}, ...]}``
+      - SearXNG HTML:     ``<a class="url_header" href="...">`` /
+                          ``<h3><a href="...">`` result articles
     """
-    urls_from_json = _parse_searxng_json(html)
-    if urls_from_json is not None:
-        hrefs = urls_from_json
-    else:
-        hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
-        if not hrefs:
-            hrefs = re.findall(r'class="result-link"[^>]*href="([^"]+)"', html)
-        if not hrefs:
-            hrefs = _extract_bing_hrefs(html)
+    hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+    if not hrefs:
+        hrefs = re.findall(r'class="result-link"[^>]*href="([^"]+)"', html)
+    if not hrefs:
+        hrefs = _extract_bing_hrefs(html)
+    if not hrefs:
+        hrefs = _extract_searxng_hrefs(html)
 
     urls: list[str] = []
     seen: set[str] = set()
@@ -418,31 +455,25 @@ def _parse_result_urls(html: str, max_results: int) -> list[str]:
     return urls
 
 
-def _parse_searxng_json(text: str) -> list[str] | None:
-    """If ``text`` is a SearXNG JSON results payload, return the result
-    URLs in order; otherwise return ``None`` (not JSON / not this shape)
-    so the caller falls back to HTML parsing."""
-    import json
-
-    stripped = text.lstrip()
-    if not stripped.startswith("{"):
-        return None
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    results = data.get("results")
-    if not isinstance(results, list):
-        return None
-    return [r.get("url", "") for r in results if isinstance(r, dict) and r.get("url")]
-
-
 def _extract_bing_hrefs(html: str) -> list[str]:
     """Extract result links from Bing's organic result blocks
     (``<li class="b_algo">``)."""
     hrefs: list[str] = []
     for block in re.findall(r'<li class="b_algo".*?</li>', html, flags=re.S):
         m = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"', block)
+        if m:
+            hrefs.append(m.group(1))
+    return hrefs
+
+
+def _extract_searxng_hrefs(html: str) -> list[str]:
+    """Extract result links from a SearXNG HTML results page
+    (``<a class="url_header" href="...">`` within ``<article class="result">``)."""
+    hrefs: list[str] = []
+    for block in re.findall(r'<article class="result[^"]*".*?</article>', html, flags=re.S):
+        m = re.search(r'<a[^>]*class="url_header"[^>]*href="([^"]+)"', block)
+        if not m:
+            m = re.search(r'<a[^>]*href="([^"]+)"', block)
         if m:
             hrefs.append(m.group(1))
     return hrefs

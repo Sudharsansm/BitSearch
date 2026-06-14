@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import bitscrape
 from bitscrape.pipeline.pipelines import BasePipeline
 
-from bie._async_utils import run_sync
+from bie._asyncutil import run_sync
 from bie.config import BIESettings
 from bie.models import Document
 from bie.spiders.generic import BIESpider
@@ -25,33 +25,39 @@ logger = logging.getLogger("bie.crawler")
 
 
 def _patch_request_ordering() -> None:
-    """Make ``bitscrape.Request`` orderable for its priority-queue
-    tie-breaks.
-
-    Bitscrape's scheduler stores requests in an ``asyncio.PriorityQueue``
-    as ``(priority.value, request)`` tuples. When two requests share the
-    same priority, ``heapq`` falls back to comparing the ``Request``
-    objects directly with ``<`` — but ``Request`` (a pydantic
-    ``BaseModel``) doesn't define ``__lt__``, so this raises::
+    """Work around a Bitscrape bug where its scheduler's
+    ``asyncio.PriorityQueue[tuple[int, Request]]`` compares ``Request``
+    objects directly whenever two requests share the same priority
+    (the common case -- most requests are ``RequestPriority.NORMAL``),
+    raising::
 
         TypeError: '<' not supported between instances of 'Request' and 'Request'
 
-    This patches in an arbitrary-but-stable ``__lt__`` (by ``id()``) so
-    same-priority requests can be ordered without error. The patch is a
-    no-op if a future Bitscrape version already defines ``__lt__`` on
-    ``Request``.
+    ``Request`` is a pydantic model with no ``__lt__``/etc., so tuple
+    comparison falls through to comparing the ``Request`` instances
+    themselves once priorities tie.
+
+    This patches ``bitscrape.Request`` (a pydantic ``BaseModel``) with an
+    identity-based ordering at import time, so equal-priority ties are
+    broken deterministically instead of crashing. This does not change
+    crawl semantics -- priority still determines order; only the
+    previously-crashing tie-break becomes well-defined.
+
+    The patch is idempotent and a no-op if a future Bitscrape release
+    already defines ``__lt__`` on ``Request``.
     """
-    request_cls = bitscrape.Request
-    current = getattr(request_cls, "__lt__", None)
-    if current is not None and current is not object.__lt__:
-        # Already defines real ordering (future Bitscrape fix) — no-op.
+    request_cls = getattr(bitscrape, "Request", None)
+    if request_cls is None:
+        logger.debug("bitscrape.Request not found -- skipping ordering patch")
         return
+    if "__lt__" in request_cls.__dict__:
+        return  # already orderable (newer bitscrape version fixed it upstream)
 
-    def _lt(self: Any, other: Any) -> bool:
-        return id(self) < id(other)
-
-    request_cls.__lt__ = _lt
-    logger.debug("Patched bitscrape.Request.__lt__ for priority-queue tie-breaks")
+    request_cls.__lt__ = lambda self, other: id(self) < id(other)
+    request_cls.__le__ = lambda self, other: id(self) <= id(other)
+    request_cls.__gt__ = lambda self, other: id(self) > id(other)
+    request_cls.__ge__ = lambda self, other: id(self) >= id(other)
+    logger.debug("Patched bitscrape.Request with identity-based ordering")
 
 
 _patch_request_ordering()
@@ -80,8 +86,10 @@ class Crawler:
         """Synchronous convenience wrapper around :meth:`acrawl`.
 
         Safe to call from plain scripts, CLI commands, server request
-        handlers, *and* Jupyter/Colab notebooks (which already run an
-        event loop) — see :func:`bie._async_utils.run_sync`.
+        handlers, *and* Jupyter/Colab/IPython notebooks (which already run
+        an event loop, where a plain ``asyncio.run()`` would raise
+        ``RuntimeError: asyncio.run() cannot be called from a running
+        event loop``). See :func:`bie._asyncutil.run_sync`.
         """
         return run_sync(self.acrawl(urls, allowed_domains, instruction))
 

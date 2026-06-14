@@ -90,16 +90,9 @@ pip install "bits-bie[server]"      # FastAPI + Uvicorn REST server
 pip install "bits-bie[mcp]"         # Model Context Protocol server
 pip install "bits-bie[render]"      # JS rendering for extract() via Playwright
 pip install "bits-bie[langchain]"   # LangChain tool adapters
-pip install "bits-bie[notebook]"    # smoother Jupyter/Colab support (nest_asyncio)
+pip install "bits-bie[notebook]"    # smoother async behaviour in Jupyter/Colab
 pip install "bits-bie[all]"         # everything
 ```
-
-> **Using BIE in Jupyter / Google Colab?** All sync entry points
-> (`engine.crawl(...)`, `bie.websearch(...)`, `bie.extract(..., render_js=True)`)
-> work inside notebooks out of the box — BIE detects the notebook's
-> already-running event loop and handles it automatically. Installing
-> `bits-bie[notebook]` (adds `nest_asyncio`) makes this slightly more
-> efficient, but is not required.
 
 > BIE depends on [`bitscrape`](https://pypi.org/project/bitscrape/), our
 > proprietary async crawling & extraction framework, which is installed
@@ -351,44 +344,62 @@ engine = BIE(BIESettings(
 | `use_embeddings` | `BIE_USE_EMBEDDINGS` | `true` | Enable semantic search |
 | `chunk_size` | `BIE_CHUNK_SIZE` | `800` | Chars per chunk |
 | `bm25_weight` / `vector_weight` | `BIE_BM25_WEIGHT` / `BIE_VECTOR_WEIGHT` | `0.5` / `0.5` | Fusion weights |
+| `discovery_backends` | `BIE_DISCOVERY_BACKENDS` | `ddg_html,ddg_lite,bing_html` | Ordered, comma-separated discovery backends for `websearch()`. Add `searxng` for a self-hosted instance. |
+| `searxng_url` | `BIE_SEARXNG_URL` | `None` | Base URL of a self-hosted SearXNG instance, used by the `searxng` discovery backend |
 | `api_key` | `BIE_API_KEY` | `None` | If set, requires `Authorization: Bearer <key>` |
-| — | `BIE_DISCOVERY_BACKENDS` | `ddg_html,ddg_lite,bing_html` | Comma-separated list and order of `websearch()` discovery backends. Known names: `ddg_html`, `ddg_lite`, `bing_html`, `searxng`. |
-| — | `BIE_SEARXNG_URL` | `None` | Base URL of a self-hosted [SearXNG](https://docs.searxng.org/) instance, used when `searxng` is included in `BIE_DISCOVERY_BACKENDS`. |
 
-### Discovery backends & troubleshooting empty `websearch()` results
+---
 
-`websearch()` discovers candidate URLs by scraping public search-engine
-result pages (DuckDuckGo HTML, DuckDuckGo Lite, Bing HTML, in that order
-by default). This is inherently fragile — these are not official APIs,
-and shared/cloud IPs (CI runners, some notebook hosts, restrictive
-sandboxes) can be rate-limited or blocked entirely.
+## Troubleshooting
 
-If `websearch()` returns `[]`, BIE logs a `WARNING` that distinguishes
-two failure categories:
+**`TypeError: '<' not supported between instances of 'Request' and 'Request'`**
+during a crawl — this was a Bitscrape scheduler bug (its priority queue
+compared `Request` objects directly when two requests shared the same
+priority). BIE patches `bitscrape.Request` to be orderable at import
+time, so this no longer occurs. If you still see it, you're likely on an
+older `bits-bie` version — upgrade.
 
-- **"network blocked"** — every backend failed at the connection level
-  (timeouts, connection refused, or a sandbox/proxy denial). This means
-  the environment itself can't reach these hosts — re-run in an
-  environment with normal internet access (a local machine, server, or
-  Colab) rather than a locked-down sandbox.
-- **"reachable but no results"** — connections succeeded but responses
-  were empty, a CAPTCHA/consent page, or rate-limited (HTTP 403/429).
-  This means the IP is likely being rate-limited; try again later, reduce
-  request frequency, or switch to a self-hosted backend (below).
+**`RuntimeError: asyncio.run() cannot be called from a running event
+loop`** — Jupyter/Colab/IPython already run an event loop, which used to
+break `engine.crawl(urls)` / `bie.websearch(...)`. Both now detect a
+running loop automatically and either use
+[`nest_asyncio`](https://pypi.org/project/nest_asyncio/) (install via
+`pip install "bits-bie[notebook]"`) or fall back to running the crawl on
+a background thread — no code changes needed. If you're already inside
+an `async def`, you can also call `await engine.acrawl(urls)` directly.
 
-For a durable fix to rate-limiting, run a self-hosted
-[SearXNG](https://docs.searxng.org/) instance and point BIE at it:
+**`bie.websearch(...)` returns `[]` / all discovery backends fail** —
+discovery scrapes DuckDuckGo/Bing's public HTML result pages, which can
+be blocked or rate-limited. Call
+`bie.discovery.get_last_discovery_diagnostics()` right after to see why:
 
-```bash
-export BIE_DISCOVERY_BACKENDS=searxng
-export BIE_SEARXNG_URL=http://localhost:8080
+```python
+import bie
+from bie.discovery import get_last_discovery_diagnostics
+
+results = bie.websearch("...")
+if not results:
+    print(get_last_discovery_diagnostics().summary())
 ```
 
-You can also combine backends and reorder them, e.g. to prefer your
-SearXNG instance but fall back to DuckDuckGo:
+This distinguishes three cases:
+
+- **Network blocked** — every backend failed at the connection level
+  (or an egress proxy returned `x-deny-reason: host_not_allowed`). This
+  environment can't reach these hosts at all — check its outbound
+  network/proxy/firewall config. Common in sandboxed code-execution
+  environments; Colab and most servers have unrestricted outbound access.
+- **Blocked / rate-limited** — backends responded with `403`/`429`/etc.,
+  typically from bot-detection on a shared IP. Retry later, reduce
+  request volume, or configure a `searxng` backend (below).
+- **Empty response** — got `200 OK` but no parseable results (often a
+  CAPTCHA/consent page).
+
+For the most reliable no-API-key discovery, self-host
+[SearXNG](https://github.com/searxng/searxng) and add it as a backend:
 
 ```bash
-export BIE_DISCOVERY_BACKENDS=searxng,ddg_html,ddg_lite
+export BIE_DISCOVERY_BACKENDS=searxng,ddg_html,ddg_lite,bing_html
 export BIE_SEARXNG_URL=http://localhost:8080
 ```
 

@@ -119,7 +119,7 @@ def test_discover_urls_all_backends_fail_returns_empty():
 
 
 def test_discover_urls_multi_merges_and_ranks_by_votes():
-    def fake_discover(query, max_results=5, timeout=15.0):
+    def fake_discover(query, max_results=5, timeout=15.0, backends=None):
         mapping = {
             "q1": ["https://a.example.com", "https://b.example.com"],
             "q2": ["https://b.example.com", "https://c.example.com"],
@@ -135,7 +135,7 @@ def test_discover_urls_multi_merges_and_ranks_by_votes():
 
 
 def test_discover_urls_multi_respects_max_total():
-    def fake_discover(query, max_results=5, timeout=15.0):
+    def fake_discover(query, max_results=5, timeout=15.0, backends=None):
         return [f"https://{query}-{i}.example.com" for i in range(5)]
 
     with patch("bie.discovery.discover_urls", side_effect=fake_discover):

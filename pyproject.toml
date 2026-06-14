@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "bits-bie"
 version = "1.2.1"
-description = "*BitS* BitSearch Intelligence Engine — real-time, citation-backed web search & extraction for AI apps. Built on Bitscrape."
+description = "BitSearch Intelligence Engine — real-time, citation-backed web search & extraction for AI apps. Built on Bitscrape."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -63,8 +63,11 @@ render = [
 langchain = [
     "langchain-core>=0.2",
 ]
+notebook = [
+    "nest_asyncio>=1.5",
+]
 all = [
-    "bits-bie[embeddings,server,mcp,render,langchain]",
+    "bits-bie[embeddings,server,mcp,render,langchain,notebook]",
 ]
 dev = [
     "pytest>=8.0",

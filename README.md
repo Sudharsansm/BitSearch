@@ -90,8 +90,16 @@ pip install "bits-bie[server]"      # FastAPI + Uvicorn REST server
 pip install "bits-bie[mcp]"         # Model Context Protocol server
 pip install "bits-bie[render]"      # JS rendering for extract() via Playwright
 pip install "bits-bie[langchain]"   # LangChain tool adapters
+pip install "bits-bie[notebook]"    # smoother Jupyter/Colab support (nest_asyncio)
 pip install "bits-bie[all]"         # everything
 ```
+
+> **Using BIE in Jupyter / Google Colab?** All sync entry points
+> (`engine.crawl(...)`, `bie.websearch(...)`, `bie.extract(..., render_js=True)`)
+> work inside notebooks out of the box — BIE detects the notebook's
+> already-running event loop and handles it automatically. Installing
+> `bits-bie[notebook]` (adds `nest_asyncio`) makes this slightly more
+> efficient, but is not required.
 
 > BIE depends on [`bitscrape`](https://pypi.org/project/bitscrape/), our
 > proprietary async crawling & extraction framework, which is installed
@@ -344,6 +352,45 @@ engine = BIE(BIESettings(
 | `chunk_size` | `BIE_CHUNK_SIZE` | `800` | Chars per chunk |
 | `bm25_weight` / `vector_weight` | `BIE_BM25_WEIGHT` / `BIE_VECTOR_WEIGHT` | `0.5` / `0.5` | Fusion weights |
 | `api_key` | `BIE_API_KEY` | `None` | If set, requires `Authorization: Bearer <key>` |
+| — | `BIE_DISCOVERY_BACKENDS` | `ddg_html,ddg_lite,bing_html` | Comma-separated list and order of `websearch()` discovery backends. Known names: `ddg_html`, `ddg_lite`, `bing_html`, `searxng`. |
+| — | `BIE_SEARXNG_URL` | `None` | Base URL of a self-hosted [SearXNG](https://docs.searxng.org/) instance, used when `searxng` is included in `BIE_DISCOVERY_BACKENDS`. |
+
+### Discovery backends & troubleshooting empty `websearch()` results
+
+`websearch()` discovers candidate URLs by scraping public search-engine
+result pages (DuckDuckGo HTML, DuckDuckGo Lite, Bing HTML, in that order
+by default). This is inherently fragile — these are not official APIs,
+and shared/cloud IPs (CI runners, some notebook hosts, restrictive
+sandboxes) can be rate-limited or blocked entirely.
+
+If `websearch()` returns `[]`, BIE logs a `WARNING` that distinguishes
+two failure categories:
+
+- **"network blocked"** — every backend failed at the connection level
+  (timeouts, connection refused, or a sandbox/proxy denial). This means
+  the environment itself can't reach these hosts — re-run in an
+  environment with normal internet access (a local machine, server, or
+  Colab) rather than a locked-down sandbox.
+- **"reachable but no results"** — connections succeeded but responses
+  were empty, a CAPTCHA/consent page, or rate-limited (HTTP 403/429).
+  This means the IP is likely being rate-limited; try again later, reduce
+  request frequency, or switch to a self-hosted backend (below).
+
+For a durable fix to rate-limiting, run a self-hosted
+[SearXNG](https://docs.searxng.org/) instance and point BIE at it:
+
+```bash
+export BIE_DISCOVERY_BACKENDS=searxng
+export BIE_SEARXNG_URL=http://localhost:8080
+```
+
+You can also combine backends and reorder them, e.g. to prefer your
+SearXNG instance but fall back to DuckDuckGo:
+
+```bash
+export BIE_DISCOVERY_BACKENDS=searxng,ddg_html,ddg_lite
+export BIE_SEARXNG_URL=http://localhost:8080
+```
 
 ---
 
@@ -380,10 +427,10 @@ for Elasticsearch/Milvus-backed implementations behind the same
 
 ---
 
-## Built on BitS
+## Built on Bitscrape
 
 BIE's crawling and extraction layer is powered by
-[**BitS**](https://github.com/Sudharsansm/Bitscrape)
+[**Bitscrape**](https://github.com/Sudharsansm/Bitscrape)
 (`pip install bitscrape`), our async, robots.txt-aware web scraping
 framework — giving BIE high-performance, polite crawling out of the box.
 

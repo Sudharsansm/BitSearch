@@ -54,6 +54,8 @@ Run as an MCP tool (for Claude Desktop, Claude Code, etc.)::
 
 from __future__ import annotations
 
+from importlib import metadata as _metadata
+
 from bie.config import BIESettings
 from bie.engine import BIE
 from bie.extract import ExtractError, ExtractResult, extract
@@ -63,7 +65,12 @@ from bie.security import SecurityFinding, SecurityReport, scan_for_prompt_inject
 from bie.sitecrawl import crawl_site
 from bie.sitemap import SiteMap, map_site
 
-__version__ = "1.2.1"
+try:
+    # Reflects the version actually installed (matches PyPI/pyproject.toml).
+    __version__ = _metadata.version("bits-bie")
+except _metadata.PackageNotFoundError:
+    # Editable/source checkout without installed metadata.
+    __version__ = "1.2.2"
 
 __all__ = [
     "BIE",

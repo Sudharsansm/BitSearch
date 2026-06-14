@@ -15,7 +15,6 @@ chromium`` once).
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -24,6 +23,7 @@ from typing import TYPE_CHECKING
 import httpx
 from markdownify import markdownify
 
+from bie._async_utils import run_sync
 from bie.security import scan_for_prompt_injection
 
 if TYPE_CHECKING:
@@ -172,7 +172,7 @@ def _fetch_with_playwright(url: str, timeout: float) -> str:
                 await browser.close()
 
     try:
-        return asyncio.run(_run())
+        return run_sync(_run())
     except Exception as exc:
         raise ExtractError(f"Failed to render {url} with Playwright: {exc}") from exc
 

@@ -9,7 +9,6 @@ objects, ready for chunking + indexing.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse
@@ -17,11 +16,45 @@ from urllib.parse import urlparse
 import bitscrape
 from bitscrape.pipeline.pipelines import BasePipeline
 
+from bie._async_utils import run_sync
 from bie.config import BIESettings
 from bie.models import Document
 from bie.spiders.generic import BIESpider
 
 logger = logging.getLogger("bie.crawler")
+
+
+def _patch_request_ordering() -> None:
+    """Make ``bitscrape.Request`` orderable for its priority-queue
+    tie-breaks.
+
+    Bitscrape's scheduler stores requests in an ``asyncio.PriorityQueue``
+    as ``(priority.value, request)`` tuples. When two requests share the
+    same priority, ``heapq`` falls back to comparing the ``Request``
+    objects directly with ``<`` — but ``Request`` (a pydantic
+    ``BaseModel``) doesn't define ``__lt__``, so this raises::
+
+        TypeError: '<' not supported between instances of 'Request' and 'Request'
+
+    This patches in an arbitrary-but-stable ``__lt__`` (by ``id()``) so
+    same-priority requests can be ordered without error. The patch is a
+    no-op if a future Bitscrape version already defines ``__lt__`` on
+    ``Request``.
+    """
+    request_cls = bitscrape.Request
+    current = getattr(request_cls, "__lt__", None)
+    if current is not None and current is not object.__lt__:
+        # Already defines real ordering (future Bitscrape fix) — no-op.
+        return
+
+    def _lt(self: Any, other: Any) -> bool:
+        return id(self) < id(other)
+
+    request_cls.__lt__ = _lt
+    logger.debug("Patched bitscrape.Request.__lt__ for priority-queue tie-breaks")
+
+
+_patch_request_ordering()
 
 
 class _CollectorPipeline(BasePipeline):
@@ -44,8 +77,13 @@ class Crawler:
     def crawl(
         self, urls: list[str], allowed_domains: list[str] | None = None, instruction: str = ""
     ) -> list[Document]:
-        """Synchronous convenience wrapper around :meth:`acrawl`."""
-        return asyncio.run(self.acrawl(urls, allowed_domains, instruction))
+        """Synchronous convenience wrapper around :meth:`acrawl`.
+
+        Safe to call from plain scripts, CLI commands, server request
+        handlers, *and* Jupyter/Colab notebooks (which already run an
+        event loop) — see :func:`bie._async_utils.run_sync`.
+        """
+        return run_sync(self.acrawl(urls, allowed_domains, instruction))
 
     async def acrawl(
         self,

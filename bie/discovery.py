@@ -59,6 +59,7 @@ programmatically (e.g. to surface a more specific error to end users).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -91,11 +92,15 @@ _DEFAULT_BACKENDS = ("ddg_html", "ddg_lite", "bing_html")
 
 # Categories used in BackendFailure.category — see module docstring.
 NETWORK_BLOCKED = "network_blocked"
-BLOCKED_OR_RATE_LIMITED = "blocked_or_rate_limited"
+HTTP_ERROR = "http_error"
 EMPTY_RESPONSE = "empty_response"
 UNKNOWN_BACKEND = "unknown_backend"
-NOT_CONFIGURED = "not_configured"
+CONFIG_ERROR = "config_error"
 OTHER_ERROR = "other_error"
+
+# Aliases kept for backwards compatibility with earlier names.
+BLOCKED_OR_RATE_LIMITED = HTTP_ERROR
+NOT_CONFIGURED = CONFIG_ERROR
 
 
 @dataclass(frozen=True)
@@ -141,7 +146,7 @@ class DiscoveryDiagnostics:
                 "for this environment (sandboxes often allowlist only specific "
                 "domains). This is an environment issue, not a BIE bug."
             )
-        if counts.get(BLOCKED_OR_RATE_LIMITED, 0) == total:
+        if counts.get(HTTP_ERROR, 0) == total:
             return (
                 "All discovery backends responded but refused the request "
                 f"({details}). This usually means the search engine is "
@@ -223,12 +228,43 @@ def discover_urls(
         as "try again" rather than "no results exist". Call
         :func:`get_last_discovery_diagnostics` to find out why.
     """
+    backend_names = backends if backends is not None else _get_configured_backends()
+    urls, _diagnostics = _discover(query, max_results, timeout, backend_names)
+    return urls
+
+
+def discover_urls_detailed(
+    query: str,
+    max_results: int = 5,
+    timeout: float = 15.0,
+    backends: list[str] | None = None,
+) -> tuple[list[str], list[BackendFailure]]:
+    """Like :func:`discover_urls`, but also returns the list of
+    :class:`BackendFailure` records describing why each unsuccessful
+    backend failed (empty if the first attempted backend succeeded).
+
+    Useful for callers that want structured failure information inline,
+    without a separate call to :func:`get_last_discovery_diagnostics`.
+    """
+    backend_names = backends if backends is not None else _get_configured_backends()
+    urls, diagnostics = _discover(query, max_results, timeout, backend_names)
+    return urls, diagnostics.failures
+
+
+def _discover(
+    query: str,
+    max_results: int,
+    timeout: float,
+    backend_names: list[str],
+) -> tuple[list[str], DiscoveryDiagnostics]:
+    """Shared implementation for :func:`discover_urls` and
+    :func:`discover_urls_detailed`: tries each backend in order, returning
+    the first non-empty, parseable result set plus full diagnostics."""
     headers = {
         "User-Agent": _USER_AGENT,
         "Accept-Language": "en-US,en;q=0.9",
     }
 
-    backend_names = backends if backends is not None else _get_configured_backends()
     diagnostics = DiscoveryDiagnostics(query=query)
 
     for name in backend_names:
@@ -252,14 +288,14 @@ def discover_urls(
                 "URL, e.g. BIE_SEARXNG_URL=http://localhost:8080"
             )
             diagnostics.failures.append(
-                BackendFailure(name, NOT_CONFIGURED, "BIE_SEARXNG_URL is not set")
+                BackendFailure(name, CONFIG_ERROR, "BIE_SEARXNG_URL is not set")
             )
             continue
 
         try:
             fetch = globals()[fetch_name]
             with httpx.Client(timeout=timeout, headers=headers, follow_redirects=True) as client:
-                html = fetch(client, query)
+                body = fetch(client, query)
         except httpx.HTTPStatusError as exc:
             category, detail = _categorize_status_error(exc)
             logger.warning("Discovery backend %s failed: %s (%s)", name, detail, category)
@@ -282,18 +318,22 @@ def discover_urls(
             diagnostics.failures.append(BackendFailure(name, OTHER_ERROR, detail))
             continue
 
-        if not html:
+        if not body:
             diagnostics.failures.append(
                 BackendFailure(name, EMPTY_RESPONSE, "response body was empty")
             )
             continue
 
-        urls = _parse_result_urls(html, max_results)
+        urls = (
+            _parse_searxng_json(body, max_results)
+            if name == "searxng"
+            else _parse_result_urls(body, max_results)
+        )
         if urls:
             logger.debug("Discovery backend %s returned %d url(s)", name, len(urls))
             diagnostics.succeeded_backend = name
             _set_last_diagnostics(diagnostics)
-            return urls
+            return urls, diagnostics
 
         diagnostics.failures.append(
             BackendFailure(
@@ -310,7 +350,7 @@ def discover_urls(
         query,
         diagnostics.summary(),
     )
-    return []
+    return [], diagnostics
 
 
 def _set_last_diagnostics(diagnostics: DiscoveryDiagnostics) -> None:
@@ -401,17 +441,19 @@ def _fetch_bing_html(client: httpx.Client, query: str) -> str:
     return resp.text
 
 
-def _fetch_searxng_html(client: httpx.Client, query: str) -> str:
-    """Query a self-hosted SearXNG instance's HTML results page.
+def _fetch_searxng(client: httpx.Client, query: str) -> str:
+    """Query a self-hosted SearXNG instance via its JSON API.
 
     Requires ``BIE_SEARXNG_URL`` to be set to the instance's base URL
     (e.g. ``http://localhost:8080``). SearXNG aggregates multiple search
-    engines server-side and exposes a stable HTML/JSON API, making it the
-    most reliable no-API-key discovery option when self-hosted.
+    engines server-side and exposes a stable ``format=json`` API
+    (https://docs.searxng.org/dev/search_api.html), making it the most
+    reliable no-API-key discovery option when self-hosted — no HTML
+    scraping/regex parsing required.
     """
     base_url = os.environ["BIE_SEARXNG_URL"]  # presence checked by caller
     search_url = urljoin(base_url.rstrip("/") + "/", "search")
-    resp = client.get(search_url, params={"q": query, "format": "html"})
+    resp = client.get(search_url, params={"q": query, "format": "json"})
     resp.raise_for_status()
     return resp.text
 
@@ -420,8 +462,44 @@ _BACKEND_FETCHER_NAMES = {
     "ddg_html": "_fetch_ddg_html",
     "ddg_lite": "_fetch_ddg_lite",
     "bing_html": "_fetch_bing_html",
-    "searxng": "_fetch_searxng_html",
+    "searxng": "_fetch_searxng",
 }
+
+
+def _parse_searxng_json(body: str, max_results: int) -> list[str]:
+    """Extract result URLs from a SearXNG ``format=json`` response body
+    (``{"results": [{"url": "...", ...}, ...]}``).
+
+    Returns ``[]`` (rather than raising) for malformed/non-JSON bodies,
+    so callers treat it the same as "no parseable results" from any other
+    backend.
+    """
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return []
+
+    if not isinstance(data, dict):
+        return []
+
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in data.get("results", []):
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not url or not isinstance(url, str) or not url.startswith("http"):
+            continue
+        if _is_blocked_host(url):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= max_results:
+            break
+
+    return urls
 
 
 def _parse_result_urls(html: str, max_results: int) -> list[str]:
@@ -431,16 +509,15 @@ def _parse_result_urls(html: str, max_results: int) -> list[str]:
       - DuckDuckGo HTML:  ``<a class="result__a" href="...">``
       - DuckDuckGo Lite:  ``<a class="result-link" href="...">``
       - Bing:             ``<li class="b_algo">...<a href="...">``
-      - SearXNG HTML:     ``<a class="url_header" href="...">`` /
-                          ``<h3><a href="...">`` result articles
+
+    (SearXNG uses its JSON API — see :func:`_parse_searxng_json` — so it
+    doesn't need an HTML pattern here.)
     """
     hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
     if not hrefs:
         hrefs = re.findall(r'class="result-link"[^>]*href="([^"]+)"', html)
     if not hrefs:
         hrefs = _extract_bing_hrefs(html)
-    if not hrefs:
-        hrefs = _extract_searxng_hrefs(html)
 
     urls: list[str] = []
     seen: set[str] = set()
@@ -466,19 +543,6 @@ def _extract_bing_hrefs(html: str) -> list[str]:
     hrefs: list[str] = []
     for block in re.findall(r'<li class="b_algo".*?</li>', html, flags=re.S):
         m = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"', block)
-        if m:
-            hrefs.append(m.group(1))
-    return hrefs
-
-
-def _extract_searxng_hrefs(html: str) -> list[str]:
-    """Extract result links from a SearXNG HTML results page
-    (``<a class="url_header" href="...">`` within ``<article class="result">``)."""
-    hrefs: list[str] = []
-    for block in re.findall(r'<article class="result[^"]*".*?</article>', html, flags=re.S):
-        m = re.search(r'<a[^>]*class="url_header"[^>]*href="([^"]+)"', block)
-        if not m:
-            m = re.search(r'<a[^>]*href="([^"]+)"', block)
         if m:
             hrefs.append(m.group(1))
     return hrefs

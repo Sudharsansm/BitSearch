@@ -36,11 +36,9 @@ _BING_SAMPLE_HTML = """
 </ol>
 """
 
-_SEARXNG_SAMPLE_HTML = """
-<article class="result">
-  <a class="url_header" href="https://www.searxng-result.example.com/page">Title</a>
-</article>
-"""
+_SEARXNG_SAMPLE_JSON = (
+    '{"results": [{"url": "https://www.searxng-result.example.com/page", "title": "Title"}]}'
+)
 
 
 def _connect_error(*_args, **_kwargs):
@@ -265,7 +263,7 @@ def test_searxng_backend_skipped_without_searxng_url(monkeypatch):
 def test_searxng_backend_used_when_configured(monkeypatch):
     monkeypatch.setenv("BIE_SEARXNG_URL", "http://localhost:8080")
 
-    with patch("bie.discovery._fetch_searxng_html", _returns(_SEARXNG_SAMPLE_HTML)):
+    with patch("bie.discovery._fetch_searxng", _returns(_SEARXNG_SAMPLE_JSON)):
         urls = discover_urls("test query", max_results=5, backends=["searxng"])
 
     assert urls == ["https://www.searxng-result.example.com/page"]
@@ -273,11 +271,19 @@ def test_searxng_backend_used_when_configured(monkeypatch):
     assert diag.succeeded_backend == "searxng"
 
 
-def test_searxng_html_extraction_parses_url_header_links():
-    from bie.discovery import _parse_result_urls
+def test_searxng_json_extraction_parses_results():
+    from bie.discovery import _parse_searxng_json
 
-    urls = _parse_result_urls(_SEARXNG_SAMPLE_HTML, max_results=5)
+    urls = _parse_searxng_json(_SEARXNG_SAMPLE_JSON, max_results=5)
     assert urls == ["https://www.searxng-result.example.com/page"]
+
+
+def test_searxng_json_extraction_handles_malformed_body():
+    from bie.discovery import _parse_searxng_json
+
+    assert _parse_searxng_json("not json", max_results=5) == []
+    assert _parse_searxng_json("[]", max_results=5) == []
+    assert _parse_searxng_json('{"results": "oops"}', max_results=5) == []
 
 
 # ---------------------------------------------------------------------------

@@ -137,6 +137,27 @@ def test_unparseable_response_categorized_as_empty_response():
     assert "CAPTCHA" in diag.summary()
 
 
+def test_empty_response_detail_includes_page_title_for_diagnosis():
+    """The failure detail should surface the served page's <title> so a
+    CAPTCHA/consent page (vs. a genuine layout change on a real results
+    page) is identifiable directly from the log/error message."""
+    captcha_page = _returns(
+        "<html><head><title>DuckDuckGo - About Your Search</title></head>"
+        "<body>Please verify you are not a robot.</body></html>"
+    )
+
+    with patch("bie.discovery._fetch_ddg_html", captcha_page), \
+         patch("bie.discovery._fetch_ddg_lite", captcha_page), \
+         patch("bie.discovery._fetch_bing_html", captcha_page):
+        urls = discover_urls("test query", max_results=5)
+
+    assert urls == []
+    diag = get_last_discovery_diagnostics()
+    for f in diag.failures:
+        assert "DuckDuckGo - About Your Search" in f.detail
+        assert "body_len=" in f.detail
+
+
 # ---------------------------------------------------------------------------
 # Mixed failure categories -> mixed summary
 # ---------------------------------------------------------------------------

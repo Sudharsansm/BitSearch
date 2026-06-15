@@ -141,26 +141,36 @@ async def search(req: SearchRequest) -> SearchResponse:
     return engine.search_full(req.query, top_k=req.top_k)
 
 
-@app.post("/search/live", tags=["search"], dependencies=[Depends(require_api_key)])
-async def search_live(req: SearchLiveRequest) -> dict:
+@app.post(
+    "/search/live",
+    tags=["search"],
+    response_model=SearchResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def search_live(req: SearchLiveRequest) -> SearchResponse:
     """Search the live internet for `query` — no seed URLs, no API key,
     no subscription required.
 
     Discovers relevant URLs via free public search endpoints (DuckDuckGo,
-    with a Bing fallback), crawls them with Bitscrape, and ranks the
-    extracted content via BIE's hybrid index.
+    Bing, and optionally a self-hosted SearXNG instance), crawls them with
+    Bitscrape, and ranks the extracted content via BIE's hybrid index.
+
+    Returns a full :class:`~bie.models.SearchResponse`: ranked ``results``,
+    an extractive ``answer`` (best-matching passage; not LLM-generated),
+    and ``degraded``/``diagnostics`` set if live discovery/crawling didn't
+    fully succeed. Call ``.to_context()`` client-side (or see
+    :class:`SearchResponse` for the equivalent text format) for an
+    LLM-prompt-ready citation block.
     """
     import bie
 
-    results = bie.websearch(
+    return bie.websearch_response(
         req.query,
         top_k=req.top_k,
         discovery_results=req.discovery_results,
         deep=req.deep,
         use_embeddings=False,
     )
-
-    return {"query": req.query, "results": [r.model_dump() for r in results]}
 
 
 @app.post("/crawl/url", response_model=CrawlResponse, tags=["ingest"], dependencies=[Depends(require_api_key)])

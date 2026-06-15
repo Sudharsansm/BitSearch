@@ -59,6 +59,7 @@ programmatically (e.g. to surface a more specific error to end users).
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -340,7 +341,8 @@ def _discover(
                 name,
                 EMPTY_RESPONSE,
                 "got a 200 OK response but no results could be parsed "
-                "(possibly a CAPTCHA/consent page or changed HTML layout)",
+                "(possibly a CAPTCHA/consent page or changed HTML layout); "
+                + _response_excerpt(body),
             )
         )
 
@@ -502,20 +504,33 @@ def _parse_searxng_json(body: str, max_results: int) -> list[str]:
     return urls
 
 
+def _class_attr_pattern(class_name: str) -> str:
+    """Build a regex fragment matching a ``class="..."`` attribute that
+    contains ``class_name`` as one of (possibly several) space-separated
+    classes, e.g. ``class="result__a js-result-title-link"``.
+
+    Real-world result pages frequently attach extra CSS classes to the
+    elements we care about; matching only an *exact* ``class="result__a"``
+    (no other classes) is brittle and a common cause of "200 OK but 0
+    results parsed".
+    """
+    return rf'class="[^"]*\b{re.escape(class_name)}\b[^"]*"'
+
+
 def _parse_result_urls(html: str, max_results: int) -> list[str]:
     """Extract organic result URLs from a search results page.
 
     Handles:
-      - DuckDuckGo HTML:  ``<a class="result__a" href="...">``
-      - DuckDuckGo Lite:  ``<a class="result-link" href="...">``
-      - Bing:             ``<li class="b_algo">...<a href="...">``
+      - DuckDuckGo HTML:  ``<a class="result__a ..." href="...">``
+      - DuckDuckGo Lite:  ``<a class="result-link ..." href="...">``
+      - Bing:             ``<h2><a href="...">`` (organic result titles)
 
     (SearXNG uses its JSON API — see :func:`_parse_searxng_json` — so it
     doesn't need an HTML pattern here.)
     """
-    hrefs = re.findall(r'class="result__a"[^>]*href="([^"]+)"', html)
+    hrefs = re.findall(_class_attr_pattern("result__a") + r'[^>]*href="([^"]+)"', html)
     if not hrefs:
-        hrefs = re.findall(r'class="result-link"[^>]*href="([^"]+)"', html)
+        hrefs = re.findall(_class_attr_pattern("result-link") + r'[^>]*href="([^"]+)"', html)
     if not hrefs:
         hrefs = _extract_bing_hrefs(html)
 
@@ -538,20 +553,32 @@ def _parse_result_urls(html: str, max_results: int) -> list[str]:
 
 
 def _extract_bing_hrefs(html: str) -> list[str]:
-    """Extract result links from Bing's organic result blocks
-    (``<li class="b_algo">``)."""
-    hrefs: list[str] = []
-    for block in re.findall(r'<li class="b_algo".*?</li>', html, flags=re.S):
-        m = re.search(r'<h2[^>]*>\s*<a[^>]*href="([^"]+)"', block)
-        if m:
-            hrefs.append(m.group(1))
-    return hrefs
+    """Extract organic result links from a Bing search results page.
+
+    Bing wraps each organic result's title in ``<h2><a href="...">...`` —
+    optionally with extra whitespace/attributes/classes. We deliberately
+    do *not* first isolate ``<li class="b_algo">...</li>`` blocks: Bing
+    frequently nests further ``<li>`` elements (e.g. sitelinks) inside an
+    organic result, which breaks non-greedy ``.*?</li>`` block extraction
+    and silently yields zero matches. Scanning the whole page for
+    ``<h2><a href="...">`` is more robust; non-result hosts are filtered
+    out afterwards via :func:`_is_blocked_host` and redirect-unwrapping.
+    """
+    return re.findall(r'<h2[^>]*>\s*<a[^>]*\bhref="([^"]+)"', html, flags=re.I)
 
 
 def _resolve_redirect(href: str) -> str | None:
-    """Unwrap DuckDuckGo's ``//duckduckgo.com/l/?uddg=<url-encoded-target>``
-    redirect links to get the real target URL. Other links pass through
-    unchanged."""
+    """Unwrap known search-engine redirect/tracking links to get the real
+    target URL:
+
+    - DuckDuckGo: ``//duckduckgo.com/l/?uddg=<url-encoded-target>``
+    - Bing: ``https://www.bing.com/ck/a?...&u=<encoded-target>...``
+      (see :func:`_decode_bing_redirect`)
+
+    Other links pass through unchanged. Returns ``None`` if a recognized
+    redirect link's target can't be decoded (better to skip it than
+    surface a useless bing.com/duckduckgo.com tracking URL as a "result").
+    """
     href = href.strip().replace("&amp;", "&")
 
     if _DDG_REDIRECT_RE.match(href):
@@ -560,7 +587,55 @@ def _resolve_redirect(href: str) -> str | None:
         target = qs.get("uddg", [None])[0]
         return unquote(target) if target else None
 
+    if "bing.com/ck/a" in href:
+        return _decode_bing_redirect(href)
+
     return href
+
+
+def _decode_bing_redirect(href: str) -> str | None:
+    """Decode a Bing click-tracking redirect URL
+    (``https://www.bing.com/ck/a?...&u=a1<base64url-encoded-target>...``)
+    to its real target URL.
+
+    Bing's ``u`` query parameter is the target URL, base64url-encoded
+    with a short non-base64 prefix (commonly ``"a1"``). Returns ``None``
+    if the parameter is missing or doesn't decode to an ``http(s)`` URL,
+    so callers can skip the link entirely rather than returning a
+    bing.com tracking URL as a "result".
+    """
+    parsed = urlparse(href if href.startswith("http") else f"https:{href}")
+    qs = parse_qs(parsed.query)
+    encoded = qs.get("u", [None])[0]
+    if not encoded or len(encoded) <= 2:
+        return None
+
+    body = encoded[2:]  # strip the non-base64 prefix (e.g. "a1")
+    padding = "=" * (-len(body) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(body + padding).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+    return decoded if decoded.startswith("http") else None
+
+
+def _response_excerpt(body: str, max_len: int = 160) -> str:
+    """A short, informative excerpt of an HTML response body for failure
+    diagnostics: the page's ``<title>`` (often reveals a CAPTCHA/consent
+    page, e.g. "DuckDuckGo - About Your Search") plus body length and a
+    short snippet of its start. Appended to ``empty_response`` failure
+    details so a future layout change is diagnosable directly from the
+    log/error message, without needing to reproduce it separately.
+    """
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", body, flags=re.S | re.I)
+    title = re.sub(r"\s+", " ", title_match.group(1)).strip()[:80] if title_match else None
+    snippet = re.sub(r"\s+", " ", body).strip()[:max_len]
+    parts = [f"body_len={len(body)}"]
+    if title:
+        parts.append(f"title={title!r}")
+    parts.append(f"snippet={snippet!r}")
+    return ", ".join(parts)
 
 
 def _is_blocked_host(url: str) -> bool:

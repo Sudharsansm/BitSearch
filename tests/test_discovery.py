@@ -1,6 +1,12 @@
 from unittest.mock import patch
 
-from bie.discovery import _parse_result_urls, _resolve_redirect, discover_urls, discover_urls_multi
+from bie.discovery import (
+    _decode_bing_redirect,
+    _parse_result_urls,
+    _resolve_redirect,
+    discover_urls,
+    discover_urls_multi,
+)
 
 # Minimal realistic snippet of DuckDuckGo HTML results page markup
 _SAMPLE_HTML = """
@@ -148,3 +154,98 @@ def test_discover_urls_multi_empty_queries():
     with patch("bie.discovery.discover_urls", return_value=[]):
         urls = discover_urls_multi([], max_results_per_query=5, max_total=10)
     assert urls == []
+
+
+# ---------------------------------------------------------------------------
+# Real-world markup robustness: multi-class attributes, nested <li>, ck/a
+# redirects. These reproduce "200 OK but 0 results parsed" failures caused
+# by overly-strict patterns that only matched a single, exact class name.
+# ---------------------------------------------------------------------------
+
+_MULTI_CLASS_DDG_HTML = """
+<div class="result">
+  <a class="result__a js-result-title-link" href="https://www.example.com/multi-class-ddg">
+    Title
+  </a>
+</div>
+"""
+
+_MULTI_CLASS_DDG_LITE_HTML = """
+<table>
+  <tr><td><a rel="nofollow" class="result-link js-lite-link" href="https://www.example.com/multi-class-lite">Title</a></td></tr>
+</table>
+"""
+
+# Bing markup with extra classes on <li>/<h2>, and a nested <li> (sitelinks)
+# inside the organic result -- this breaks a non-greedy `<li ...>.*?</li>`
+# block extraction, since it matches up to the *inner* </li>.
+_NESTED_LI_BING_HTML = """
+<ol id="b_results">
+  <li class="b_algo b_algoBig">
+    <h2 class="title"><a target="_blank" href="https://www.example.com/nested-li-result">Outer Result</a></h2>
+    <div class="b_caption">
+      <ul class="b_vlist2col">
+        <li><a href="https://www.example.com/sitelink-one">Sitelink One</a></li>
+        <li><a href="https://www.example.com/sitelink-two">Sitelink Two</a></li>
+      </ul>
+    </div>
+  </li>
+</ol>
+"""
+
+_BING_CK_A_HTML = (
+    '<ol id="b_results"><li class="b_algo"><h2><a href='
+    '"https://www.bing.com/ck/a?!&amp;&amp;p=abc&amp;u=a1aHR0cHM6Ly93d3cuZXhhbXBsZS5jb20vYXJ0aWNsZQ&amp;ntb=1">'
+    "Title</a></h2></li></ol>"
+)
+
+
+def test_parse_result_urls_handles_multi_class_ddg_html():
+    """A `class="result__a js-result-title-link"` attribute (extra CSS
+    classes alongside `result__a`) must still match."""
+    urls = _parse_result_urls(_MULTI_CLASS_DDG_HTML, max_results=5)
+    assert urls == ["https://www.example.com/multi-class-ddg"]
+
+
+def test_parse_result_urls_handles_multi_class_ddg_lite_html():
+    urls = _parse_result_urls(_MULTI_CLASS_DDG_LITE_HTML, max_results=5)
+    assert urls == ["https://www.example.com/multi-class-lite"]
+
+
+def test_parse_result_urls_bing_with_nested_li_sitelinks():
+    """The organic result's <h2><a> link must be found even when the
+    <li class="b_algo"> block contains nested <li> sitelinks, which would
+    truncate a naive non-greedy `.*?</li>` block match."""
+    urls = _parse_result_urls(_NESTED_LI_BING_HTML, max_results=5)
+    assert "https://www.example.com/nested-li-result" in urls
+
+
+def test_decode_bing_redirect_extracts_target_url():
+    href = (
+        "https://www.bing.com/ck/a?!&&p=abc"
+        "&u=a1aHR0cHM6Ly93d3cuZXhhbXBsZS5jb20vYXJ0aWNsZQ"
+        "&ntb=1"
+    )
+    assert _decode_bing_redirect(href) == "https://www.example.com/article"
+
+
+def test_decode_bing_redirect_returns_none_for_missing_u_param():
+    assert _decode_bing_redirect("https://www.bing.com/ck/a?!&&p=abc") is None
+
+
+def test_decode_bing_redirect_returns_none_for_undecodable_u_param():
+    assert _decode_bing_redirect("https://www.bing.com/ck/a?u=not-valid-base64!!!") is None
+
+
+def test_resolve_redirect_unwraps_bing_ck_a():
+    href = (
+        "https://www.bing.com/ck/a?!&&p=abc"
+        "&u=a1aHR0cHM6Ly93d3cuZXhhbXBsZS5jb20vYXJ0aWNsZQ"
+        "&ntb=1"
+    )
+    assert _resolve_redirect(href) == "https://www.example.com/article"
+
+
+def test_parse_result_urls_unwraps_bing_ck_a_redirects():
+    urls = _parse_result_urls(_BING_CK_A_HTML, max_results=5)
+    assert urls == ["https://www.example.com/article"]

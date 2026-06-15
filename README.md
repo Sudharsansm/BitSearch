@@ -10,7 +10,7 @@ API keys, no subscriptions, no third-party search services.**
 
 BIE gives any LLM, RAG pipeline, or AI agent five core primitives —
 **search, extract, map, crawl, and a hybrid index** — all running locally
-on top of [**BitS **](https://pypi.org/project/bitscrape/), our
+on top of [**BitS**](https://pypi.org/project/bitscrape/), our
 async crawling framework. Use it as a Python library, REST API, CLI, or
 [MCP](https://modelcontextprotocol.io) server.
 
@@ -56,13 +56,46 @@ state-of-the-art ranking, a commercial search API may still be the right
 choice for that piece. BIE is for teams that want a capable, free,
 self-hosted starting point — and full control over the code.
 
+### How this compares to ChatGPT Search / Tavily
+
+`bie.websearch_response()` is shaped like those tools' "web search" tool
+responses on purpose: ranked, cited `results` with snippets, an
+`answer` field, and `.to_context()` for dropping straight into a prompt.
+Two things are genuinely different, and worth being precise about:
+
+- **`answer` is extractive, not generated.** ChatGPT Search and Tavily's
+  `include_answer` run an LLM server-side to *write* a summary answer.
+  BIE doesn't run an LLM — `answer` is the single best-matching passage
+  found (verbatim from a live page). It's a strong starting point for
+  *your* LLM/agent to read and synthesize from, not a finished answer on
+  its own.
+- **Discovery is "best-effort free", not a dedicated index.** ChatGPT
+  Search/Tavily run their own crawl infrastructure and indexes. BIE's
+  default discovery scrapes DuckDuckGo/Bing's public result pages, which
+  can be rate-limited or served a CAPTCHA — `degraded`/`diagnostics` tell
+  you when this happens for a given query, so your agent can react (retry,
+  fall back to general knowledge, etc.) instead of silently getting a
+  bad answer.
+
+**SearXNG closes most of that second gap.** Self-hosting
+[SearXNG](https://github.com/searxng/searxng) and adding it as a
+discovery backend (`BIE_DISCOVERY_BACKENDS=searxng,...` +
+`BIE_SEARXNG_URL=...`) gives BIE a stable JSON API that itself aggregates
+Google/Bing/Brave/etc. server-side — far less prone to the "200 OK but
+0 results" failure mode of scraping DDG/Bing HTML directly. It's the
+single highest-leverage change for making `websearch()`'s *discovery*
+step behave consistently. It doesn't change the `answer` field's
+extractive (vs. LLM-generated) nature — that's a property of BIE not
+running an LLM, independent of which discovery backend is used.
+
 ---
 
 ## Core primitives
 
 | Function | What it does |
 |---|---|
-| `bie.websearch(query)` | Search the live internet — no URLs needed. Free discovery (DuckDuckGo + Bing fallback) with query fan-out, crawled and ranked by BIE's hybrid index. |
+| `bie.websearch(query)` | Search the live internet — no URLs needed. Free discovery (DuckDuckGo + Bing fallback, optional SearXNG) with query fan-out, crawled and ranked by BIE's hybrid index. |
+| `bie.websearch_response(query)` | Like `websearch`, but returns the full Tavily/ChatGPT-Search-shaped response: ranked `results`, an extractive `answer`, `degraded`/`diagnostics`, and `.to_context()` for an LLM-prompt-ready citation block. |
 | `bie.extract(url)` | Fetch a URL and return clean Markdown, with nav/ads/scripts stripped. Optional JS rendering via Playwright. |
 | `bie.map_site(url)` | Discover a site's sitemap(s) and the URLs they list, before crawling. |
 | `bie.crawl_site(urls, instruction=...)` | Crawl a site, prioritizing links by keyword-relevance to your instruction. Returns an index + ranked results. |
@@ -111,6 +144,20 @@ results = bie.websearch("who won the latest F1 race")
 for r in results:
     print(r.title, "—", r.url)
     print(r.snippet)
+```
+
+For the full, Tavily/ChatGPT-Search-shaped response — extractive
+`answer`, timing, and `degraded`/`diagnostics` for when live discovery
+doesn't fully succeed:
+
+```python
+response = bie.websearch_response("who won the latest F1 race")
+
+print(response.answer)         # best-matching passage (not LLM-written)
+print(response.to_context())    # numbered sources block, ready for a prompt
+
+if response.degraded:
+    print("live data degraded:", response.diagnostics)
 ```
 
 `websearch` pipeline:
@@ -438,7 +485,7 @@ for Elasticsearch/Milvus-backed implementations behind the same
 
 ---
 
-## Built on Bitscrape
+## Built on BitS
 
 BIE's crawling and extraction layer is powered by
 [**BitS**](https://github.com/Sudharsansm/Bitscrape)

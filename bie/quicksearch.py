@@ -18,11 +18,12 @@
 from __future__ import annotations
 
 import re
+import time
 
 from bie.config import BIESettings
-from bie.discovery import discover_urls, discover_urls_multi
+from bie.discovery import discover_urls, discover_urls_multi, get_last_discovery_diagnostics
 from bie.engine import BIE
-from bie.models import SearchResult
+from bie.models import SearchResponse, SearchResult
 from bie.query_expansion import generate_query_variants
 from bie.security import scan_for_prompt_injection
 
@@ -68,10 +69,10 @@ def websearch(
 
       1. **Discovery** — find candidate URLs for ``query`` using free,
          public, no-key search endpoints (DuckDuckGo, with a Bing
-         fallback). When ``fanout=True`` (default), several phrasings of
-         the query are searched and merged
-         (:func:`bie.discovery.discover_urls_multi`), improving recall on
-         ambiguous or multi-part questions.
+         fallback, and optionally a self-hosted SearXNG instance). When
+         ``fanout=True`` (default), several phrasings of the query are
+         searched and merged (:func:`bie.discovery.discover_urls_multi`),
+         improving recall on ambiguous or multi-part questions.
       2. **Crawl + rank** — the discovered URLs are crawled with
          Bitscrape, their text extracted and chunked, and ranked against
          ``query`` using BIE's hybrid BM25 + vector index.
@@ -83,6 +84,12 @@ def websearch(
          :mod:`bie.security` for details and use
          :func:`bie.extract.extract` (which returns a full
          ``SecurityReport``) for page-level analysis.
+
+    Returns the ranked ``results`` list only. For the full response —
+    including an extractive ``answer``, timing, and ``degraded``/
+    ``diagnostics`` info for when live discovery doesn't fully succeed —
+    use :func:`websearch_response`, or call
+    ``.to_context()`` on it for an LLM-prompt-ready text block.
 
     Args:
         query: The natural-language search query.
@@ -116,6 +123,48 @@ def websearch(
             print(r.title, "-", r.url)
             print(r.snippet)
     """
+    return websearch_response(
+        query,
+        top_k=top_k,
+        discovery_results=discovery_results,
+        deep=deep,
+        fanout=fanout,
+        max_query_variants=max_query_variants,
+        scan_security=scan_security,
+        **settings_kwargs,
+    ).results
+
+
+def websearch_response(
+    query: str,
+    top_k: int = 10,
+    discovery_results: int = 8,
+    deep: bool = True,
+    fanout: bool = True,
+    max_query_variants: int = 3,
+    scan_security: bool = True,
+    **settings_kwargs,
+) -> SearchResponse:
+    """Like :func:`websearch`, but returns a full :class:`SearchResponse`
+    instead of just ``results`` — closer to how Tavily/ChatGPT-Search-style
+    "web search tool" responses are shaped for LLM agents:
+
+    - ``results`` — ranked, cited sources (title, url, snippet, score).
+    - ``answer`` — an *extractive* quick answer (best-matching passage;
+      **not** LLM-generated — see :class:`bie.models.SearchResponse`).
+    - ``took_ms`` — wall-clock time for the whole discover→crawl→rank
+      pipeline.
+    - ``degraded`` / ``diagnostics`` — set when live discovery or crawling
+      didn't fully succeed, so ``results`` are bare discovered URLs rather
+      than ranked/crawled content. Check this before trusting ``answer``.
+
+    Call ``.to_context()`` on the result for a ready-to-paste, numbered
+    citation block for an LLM prompt.
+
+    All other arguments are identical to :func:`websearch`.
+    """
+    start = time.perf_counter()
+
     if fanout and max_query_variants > 1:
         variants = generate_query_variants(query, max_variants=max_query_variants)
         urls = discover_urls_multi(
@@ -127,19 +176,17 @@ def websearch(
         urls = discover_urls(query, max_results=discovery_results)
 
     if not urls:
-        return []
+        return SearchResponse(
+            query=query,
+            results=[],
+            took_ms=_elapsed_ms(start),
+            degraded=True,
+            diagnostics=get_last_discovery_diagnostics().summary(),
+        )
 
     if not deep:
-        return [
-            SearchResult(
-                title=url,
-                url=url,
-                snippet="",
-                source=_domain(url),
-                score=1.0 / (i + 1),
-            )
-            for i, url in enumerate(urls[:top_k])
-        ]
+        results = _bare_url_results(urls, top_k)
+        return SearchResponse(query=query, results=results, took_ms=_elapsed_ms(start))
 
     settings_kwargs.setdefault("max_pages", 1)
     settings_kwargs.setdefault("max_depth", 0)
@@ -150,12 +197,39 @@ def websearch(
     if results:
         if scan_security:
             results = _filter_injection_only_results(engine, results)
-        return results[:top_k]
+        results = results[:top_k]
+        return SearchResponse(
+            query=query,
+            results=results,
+            took_ms=_elapsed_ms(start),
+            total_indexed_documents=len(engine),
+            answer=_extract_answer(results),
+        )
 
-    # Fallback: crawling produced nothing usable (e.g. all JS-rendered
-    # pages, or every page failed/blocked) — return discovered URLs
-    # without snippets rather than an empty list, so the caller still
-    # gets *something* to work with.
+    # Crawling produced nothing usable (e.g. all JS-rendered pages, or
+    # every page failed/blocked) — return discovered URLs without
+    # snippets rather than an empty list, so the caller still gets
+    # *something* to work with, but flag it as degraded.
+    return SearchResponse(
+        query=query,
+        results=_bare_url_results(urls, top_k),
+        took_ms=_elapsed_ms(start),
+        total_indexed_documents=len(engine),
+        degraded=True,
+        diagnostics=(
+            "discovery succeeded but crawling/extraction returned no usable "
+            "content for any discovered URL (e.g. JS-required pages, "
+            "fetch failures, or blocked responses); showing discovered "
+            "URLs without ranked snippets"
+        ),
+    )
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 2)
+
+
+def _bare_url_results(urls: list[str], top_k: int) -> list[SearchResult]:
     return [
         SearchResult(
             title=url,
@@ -166,6 +240,32 @@ def websearch(
         )
         for i, url in enumerate(urls[:top_k])
     ]
+
+
+def _extract_answer(results: list[SearchResult], max_chars: int = 400) -> str | None:
+    """Build an *extractive* "quick answer" from the top-ranked result's
+    snippet: the single most relevant passage found, trimmed to a sentence
+    boundary near ``max_chars``.
+
+    This is deliberately simple and non-LLM: BIE doesn't run a language
+    model itself. The goal is to give the calling LLM/agent a fast,
+    likely-relevant starting point — it (along with the cited ``results``)
+    is what the agent reads to compose its actual answer. Returns ``None``
+    if the top result has no snippet text (e.g. ``deep=False`` or a
+    degraded/bare-URL result).
+    """
+    if not results or not results[0].snippet:
+        return None
+
+    snippet = results[0].snippet.strip()
+    if len(snippet) <= max_chars:
+        return snippet
+
+    truncated = snippet[:max_chars]
+    last_period = truncated.rfind(". ")
+    if last_period > max_chars * 0.4:
+        return truncated[: last_period + 1]
+    return truncated.rstrip() + "…"
 
 
 def _filter_injection_only_results(engine: BIE, results: list[SearchResult]) -> list[SearchResult]:

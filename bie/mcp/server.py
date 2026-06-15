@@ -58,8 +58,21 @@ def run_mcp_server() -> None:
     def bie_web_search(query: str, top_k: int = 5, deep: bool = True) -> str:
         """Search the live internet for `query` — no URLs, no API key, no
         subscription required. Discovers relevant pages via free public
-        search endpoints and crawls/ranks them with Bitscrape + BIE's
-        hybrid index.
+        search endpoints (and a self-hosted SearXNG instance, if
+        configured) and crawls/ranks them with Bitscrape + BIE's hybrid
+        index.
+
+        Returns a JSON object shaped like a Tavily/ChatGPT-Search-style
+        web search tool response:
+          - `answer`: extractive "quick answer" (best-matching passage;
+            not LLM-generated — read it alongside `results`/`context`).
+          - `context`: a numbered, citation-ready text block — paste this
+            directly into your reasoning/response.
+          - `results`: ranked sources (title, url, snippet, score).
+          - `degraded`/`diagnostics`: set if live discovery/crawling
+            didn't fully succeed, so `results` are bare URLs without
+            extracted content — treat `answer`/`context` with caution
+            (or `None`/absent) in that case.
 
         Args:
             query: The natural-language search query.
@@ -71,8 +84,18 @@ def run_mcp_server() -> None:
         """
         import bie
 
-        results = bie.websearch(query, top_k=top_k, deep=deep, use_embeddings=False)
-        return json.dumps([r.model_dump() for r in results], indent=2)
+        response = bie.websearch_response(query, top_k=top_k, deep=deep, use_embeddings=False)
+        return json.dumps(
+            {
+                "answer": response.answer,
+                "context": response.to_context(),
+                "results": [r.model_dump() for r in response.results],
+                "degraded": response.degraded,
+                "diagnostics": response.diagnostics,
+                "took_ms": response.took_ms,
+            },
+            indent=2,
+        )
 
     @mcp.tool()
     def bie_extract(url: str, render_js: bool = False) -> str:

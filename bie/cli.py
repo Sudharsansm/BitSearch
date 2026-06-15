@@ -70,6 +70,12 @@ def search(query: str, urls: tuple[str, ...], top_k: int, max_pages: int, no_emb
 @click.option("--no-deep", is_flag=True, help="Skip crawling; return raw discovery order without snippets")
 @click.option("--no-embeddings", is_flag=True, help="Disable semantic/vector re-ranking (BM25 only)")
 @click.option("--json", "as_json", is_flag=True, help="Output raw JSON")
+@click.option(
+    "--context",
+    "as_context",
+    is_flag=True,
+    help="Output a numbered, citation-ready text block for an LLM prompt (response.to_context())",
+)
 def search_live(
     query: str,
     top_k: int,
@@ -77,16 +83,18 @@ def search_live(
     no_deep: bool,
     no_embeddings: bool,
     as_json: bool,
+    as_context: bool,
 ) -> None:
     """Search the live internet for QUERY — no seed URLs, no API key, no subscription.
 
     Discovers relevant URLs via free public search endpoints (DuckDuckGo,
-    with a Bing fallback), crawls them with Bitscrape, and ranks the
+    Bing, and optionally a self-hosted SearXNG instance — see
+    BIE_DISCOVERY_BACKENDS), crawls them with Bitscrape, and ranks the
     extracted content against QUERY using BIE's hybrid BM25+vector index.
     """
     import bie
 
-    results = bie.websearch(
+    response = bie.websearch_response(
         query,
         top_k=top_k,
         discovery_results=discovery_results,
@@ -95,22 +103,39 @@ def search_live(
     )
 
     if as_json:
-        click.echo(json.dumps([r.model_dump() for r in results], indent=2))
+        click.echo(response.model_dump_json(indent=2))
         return
 
-    if not results:
+    if as_context:
+        click.echo(response.to_context())
+        return
+
+    if not response.results:
         click.echo(
             "No results found. The free search backends may be temporarily "
-            "rate-limiting — try again in a moment."
+            "rate-limiting — try again in a moment.\n"
         )
+        if response.diagnostics:
+            click.echo(f"Diagnosis: {response.diagnostics}")
         return
 
-    for i, r in enumerate(results, 1):
+    if response.answer:
+        click.echo(f"Answer: {response.answer}\n")
+
+    if response.degraded:
+        click.echo("⚠ Live discovery/crawling was degraded for this query.")
+        if response.diagnostics:
+            click.echo(f"  {response.diagnostics}")
+        click.echo()
+
+    for i, r in enumerate(response.results, 1):
         click.echo(f"\n{i}. {r.title}")
         click.echo(f"   {r.url}")
         click.echo(f"   score={r.score:.4f}")
         if r.snippet:
             click.echo(f"   {r.snippet}")
+
+    click.echo(f"\n({response.took_ms:.0f}ms)")
 
 
 @cli.command()

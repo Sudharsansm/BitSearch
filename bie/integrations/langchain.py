@@ -55,15 +55,12 @@ class CrawlSiteInput(BaseModel):
 
 
 def _websearch(query: str, top_k: int = 5) -> str:
-    """Search the live internet for `query` and return ranked results with
-    titles, URLs, and snippets as formatted text."""
-    results = bie.websearch(query, top_k=top_k, use_embeddings=False)
-    if not results:
-        return "No results found."
-    lines = []
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r.title}\n   {r.url}\n   {r.snippet}")
-    return "\n\n".join(lines)
+    """Search the live internet for `query` and return a Tavily/ChatGPT-
+    Search-style text block: an extractive answer (if available) followed
+    by numbered, cited sources with titles, URLs, and snippets — ready to
+    read directly or quote from."""
+    response = bie.websearch_response(query, top_k=top_k, use_embeddings=False)
+    return response.to_context()
 
 
 def _extract(url: str, render_js: bool = False) -> str:

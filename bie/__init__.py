@@ -10,6 +10,10 @@ Core primitives
 ----------------
 
 - :func:`websearch` — search the live internet for a query (no URLs needed)
+- :func:`websearch_response` — like ``websearch``, but returns a full
+  :class:`SearchResponse` (extractive ``answer``, ``took_ms``,
+  ``degraded``/``diagnostics``, and ``.to_context()`` for LLM prompts) —
+  the Tavily/ChatGPT-Search-style "web search tool" shape
 - :func:`search` — crawl + rank specific URLs against a query
 - :func:`extract` — get clean Markdown from a single URL
 - :func:`map_site` — discover a site's sitemap before crawling
@@ -28,6 +32,11 @@ Quick start
     for r in results:
         print(r.title, r.url)
         print(r.snippet)
+
+    # Or get the full response — extractive answer + LLM-ready context
+    response = bie.websearch_response("who won the latest F1 race")
+    print(response.answer)        # best-matching passage (not LLM-written)
+    print(response.to_context())  # numbered sources block, ready for a prompt
 
     # Get clean markdown from a specific page
     page = bie.extract("https://example.com/article")
@@ -59,8 +68,8 @@ from importlib import metadata as _metadata
 from bie.config import BIESettings
 from bie.engine import BIE
 from bie.extract import ExtractError, ExtractResult, extract
-from bie.models import Document, SearchResult
-from bie.quicksearch import search, websearch
+from bie.models import Document, SearchResponse, SearchResult
+from bie.quicksearch import search, websearch, websearch_response
 from bie.security import SecurityFinding, SecurityReport, scan_for_prompt_injection
 from bie.sitecrawl import crawl_site
 from bie.sitemap import SiteMap, map_site
@@ -70,15 +79,17 @@ try:
     __version__ = _metadata.version("bits-bie")
 except _metadata.PackageNotFoundError:
     # Editable/source checkout without installed metadata.
-    __version__ = "1.2.4"
+    __version__ = "1.2.5"
 
 __all__ = [
     "BIE",
     "BIESettings",
     "Document",
     "SearchResult",
+    "SearchResponse",
     "search",
     "websearch",
+    "websearch_response",
     "extract",
     "ExtractResult",
     "ExtractError",

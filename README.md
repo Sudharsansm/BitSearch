@@ -10,7 +10,7 @@ API keys, no subscriptions, no third-party search services.**
 
 BIE gives any LLM, RAG pipeline, or AI agent five core primitives —
 **search, extract, map, crawl, and a hybrid index** — all running locally
-on top of [**Bitscrape**](https://pypi.org/project/bitscrape/), our
+on top of [**BitS **](https://pypi.org/project/bitscrape/), our
 async crawling framework. Use it as a Python library, REST API, CLI, or
 [MCP](https://modelcontextprotocol.io) server.
 
@@ -441,7 +441,7 @@ for Elasticsearch/Milvus-backed implementations behind the same
 ## Built on Bitscrape
 
 BIE's crawling and extraction layer is powered by
-[**Bitscrape**](https://github.com/Sudharsansm/Bitscrape)
+[**BitS**](https://github.com/Sudharsansm/Bitscrape)
 (`pip install bitscrape`), our async, robots.txt-aware web scraping
 framework — giving BIE high-performance, polite crawling out of the box.
 
